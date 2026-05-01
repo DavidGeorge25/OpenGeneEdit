@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260430-2215" />
+    <link rel="stylesheet" href="/css/app.css?v=20260430-2358" />
   </head>
   <body>
     <nav class="topnav">
@@ -70,6 +70,38 @@
               <p class="bubble-body thought" id="thoughtText"></p>
               <span class="bubble-status" id="streamBadge">…</span>
             </article>
+
+            <section class="chat-metrics" id="metrics" hidden aria-label="Construct stats">
+              <span class="chat-metrics-label">Construct stats</span>
+              <div class="chat-metrics-grid">
+                <div class="metric">
+                  <span class="metric-label">Length</span>
+                  <strong class="metric-value" id="mLen">—</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">GC %</span>
+                  <strong class="metric-value" id="mGc">—</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Est. Tm</span>
+                  <strong class="metric-value" id="mTm">—</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="chat-sequence" id="seqCard" hidden aria-label="DNA sequence">
+              <div class="chat-sequence-head">
+                <span class="chat-sequence-label">DNA sequence</span>
+                <button type="button" class="btn-icon" id="seqCopyBtn" title="Copy sequence">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                  <span class="btn-icon-label" id="seqCopyLabel">Copy</span>
+                </button>
+              </div>
+              <pre class="chat-sequence-body" id="seqPre"></pre>
+            </section>
           </div>
         </aside>
 
@@ -80,7 +112,6 @@
               <span class="artifact-kind">Circular map · exports</span>
             </div>
             <div class="artifact-actions">
-              <button type="button" class="btn-tool" id="copySeq" title="Copy DNA">Copy</button>
               <button type="button" class="btn-tool" id="dlFasta">FASTA</button>
               <button type="button" class="btn-tool" id="dlGb">GenBank</button>
             </div>
@@ -136,32 +167,56 @@
               </div>
             </div>
 
-            <div class="metrics" id="metrics">
-              <div class="metric">
-                <span class="metric-label">Length</span>
-                <strong class="metric-value" id="mLen">—</strong>
-              </div>
-              <div class="metric">
-                <span class="metric-label">GC %</span>
-                <strong class="metric-value" id="mGc">—</strong>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Est. Tm</span>
-                <strong class="metric-value" id="mTm">—</strong>
-              </div>
-            </div>
-
-            <div class="artifact-section artifact-section--seq">
-              <div class="sequence-head">
-                <h3 class="artifact-h3 artifact-h3--inline">DNA sequence</h3>
-              </div>
-              <pre class="sequence" id="seqPre"></pre>
-            </div>
           </div>
         </div>
+
+        <aside class="extras-pane" aria-label="Compiler analysis">
+          <header class="extras-toolbar">
+            <span class="extras-title">Compiler output</span>
+            <span class="extras-toolbar-meta" id="extrasMeta"></span>
+          </header>
+          <div class="extras-scroll" id="extrasScroll">
+            <section class="pareto-card" id="paretoSection" hidden aria-label="Pareto front">
+              <header class="pareto-card-head">
+                <span class="pareto-card-label">Pareto front</span>
+                <span class="pareto-card-meta">expression × low burden</span>
+              </header>
+              <div class="pareto-frame">
+                <svg id="paretoSvg" viewBox="0 0 480 320" preserveAspectRatio="xMidYMid meet" class="pareto-svg" role="img" aria-label="Pareto chart of expression vs burden">
+                  <g id="paretoAxes"></g>
+                  <g id="paretoPoints"></g>
+                  <text x="240" y="312" text-anchor="middle" class="pareto-axis-label">Predicted expression  →</text>
+                  <text x="14" y="160" text-anchor="middle" transform="rotate(-90 14 160)" class="pareto-axis-label">↑  Low burden</text>
+                </svg>
+                <div class="pareto-tooltip" id="paretoTip" hidden></div>
+              </div>
+              <p class="pareto-card-foot">Click any point to load that candidate · top-right is best</p>
+            </section>
+
+            <section class="candidates-card" id="candidatesCard" hidden aria-label="Generated candidates">
+              <header class="candidates-card-head">
+                <span class="candidates-card-label">Candidates</span>
+                <span class="candidates-card-meta" id="candidatesCardMeta"></span>
+              </header>
+              <ol class="candidates-list" id="candidatesList"></ol>
+              <p class="candidates-card-foot">
+                <span class="legend-dot legend-dot--pareto"></span> Pareto-optimal
+                <span class="legend-dot legend-dot--dominated"></span> Dominated
+              </p>
+            </section>
+
+            <section class="passes-card" id="passesCard" hidden aria-label="Compiler passes">
+              <header class="passes-card-head">
+                <span class="passes-card-label">Compiler passes</span>
+                <span class="passes-card-meta" id="passesCardMeta"></span>
+              </header>
+              <ol class="passes-list" id="passesList"></ol>
+            </section>
+          </div>
+        </aside>
       </div>
     </section>
 
-    <script src="/js/app.js?v=20260430-2215" type="module"></script>
+    <script src="/js/app.js?v=20260430-2350" type="module"></script>
   </body>
 </html>

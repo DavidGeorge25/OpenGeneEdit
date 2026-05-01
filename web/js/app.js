@@ -459,9 +459,22 @@ function showLanding() {
   $("plasmidLabels").innerHTML = "";
   $("plasmidTicks").innerHTML = "";
   $("plasmidSites").innerHTML = "";
+  $("metrics").hidden = true;
+  $("seqCard").hidden = true;
+  $("passesCard").hidden = true;
+  $("candidatesCard").hidden = true;
+  $("paretoSection").hidden = true;
+  $("passesList").innerHTML = "";
+  $("candidatesList").innerHTML = "";
+  $("paretoPoints").innerHTML = "";
+  $("paretoAxes").innerHTML = "";
+  const extrasMeta = document.getElementById("extrasMeta");
+  if (extrasMeta) extrasMeta.textContent = "";
   $("mLen").textContent = "—";
   $("mGc").textContent = "—";
   $("mTm").textContent = "—";
+  state.candidates = [];
+  state.selectedId = null;
   lastSequence = "";
 }
 
@@ -472,6 +485,247 @@ function setModelLabel(model) {
 }
 
 let lastSequence = "";
+
+const state = {
+  candidates: [],
+  selectedId: null,
+};
+
+const PASS_GLYPH = { ok: "✓", warn: "!", error: "✕" };
+
+function getCandidate(id) {
+  return state.candidates.find((c) => c.id === id) || null;
+}
+
+function passMetricFor(passes, passId, key = "metric_raw") {
+  const p = passes.find((x) => x.pass_id === passId);
+  return p ? p[key] : null;
+}
+
+/** Render the compiler-passes log. animate=true reveals one row at a time. */
+function renderPasses(passes, { animate } = { animate: false }) {
+  const list = $("passesList");
+  list.innerHTML = "";
+
+  const counts = passes.reduce(
+    (acc, p) => ((acc[p.status] = (acc[p.status] || 0) + 1), acc),
+    {}
+  );
+  const totalMs = passes.reduce((s, p) => s + (p.duration_ms || 0), 0);
+  $("passesCardMeta").textContent =
+    `${passes.length} passes · ${(counts.ok || 0)}✓ ${(counts.warn || 0)}! ${(counts.error || 0)}✕ · ${totalMs.toFixed(1)} ms`;
+
+  passes.forEach((p, i) => {
+    const li = document.createElement("li");
+    li.className = "pass-row";
+    li.dataset.status = p.status;
+    li.style.animationDelay = animate ? `${i * 90}ms` : "0ms";
+
+    li.innerHTML = `
+      <span class="pass-icon" aria-hidden="true">${PASS_GLYPH[p.status] || "·"}</span>
+      <div class="pass-body">
+        <span class="pass-name">${escapeHtml(p.pass_id)}</span>
+        <span class="pass-summary">${escapeHtml(p.summary || p.name)}</span>
+      </div>
+      <span class="pass-duration">${(p.duration_ms || 0).toFixed(1)}ms</span>
+    `;
+
+    if (p.diagnostics && p.diagnostics.length) {
+      li.addEventListener("click", () => {
+        const opened = li.classList.toggle("is-open");
+        const existing = li.querySelector(".pass-diagnostics");
+        if (existing) existing.remove();
+        if (opened) {
+          const div = document.createElement("div");
+          div.className = "pass-diagnostics";
+          div.innerHTML = p.diagnostics
+            .map((d) => {
+              const pos =
+                d.start != null
+                  ? ` <span class="pass-diag-pos">@ ${d.start}${d.end && d.end !== d.start ? `–${d.end}` : ""} bp</span>`
+                  : "";
+              return `<div class="pass-diag" data-sev="${d.severity}">${escapeHtml(d.message)}${pos}</div>`;
+            })
+            .join("");
+          li.appendChild(div);
+        }
+      });
+    } else {
+      li.style.cursor = "default";
+    }
+
+    list.appendChild(li);
+  });
+
+  $("passesCard").hidden = false;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderCandidates(candidates, selectedId) {
+  const list = $("candidatesList");
+  list.innerHTML = "";
+  const paretoCount = candidates.filter((c) => c.is_pareto).length;
+  $("candidatesCardMeta").textContent = `${candidates.length} generated · ${paretoCount} on Pareto front`;
+
+  for (const c of candidates) {
+    const li = document.createElement("li");
+    li.className = "candidate-row";
+    if (c.is_pareto) li.classList.add("is-pareto");
+    if (c.id === selectedId) li.classList.add("is-selected");
+    li.dataset.id = c.id;
+
+    const expr = (c.scores.expression * 100).toFixed(0);
+    const burden = ((1 - c.scores.low_burden) * 100).toFixed(0);
+    const gc = (c.scores.gc_balance * 100).toFixed(0);
+    const clean = (c.scores.cleanliness * 100).toFixed(0);
+
+    li.innerHTML = `
+      <span class="candidate-pareto" title="${c.is_pareto ? "Pareto-optimal" : "Dominated"}">${c.is_pareto ? "★" : "○"}</span>
+      <div class="candidate-meta">
+        <span class="candidate-strategy">${escapeHtml(c.strategy_name || c.id)}</span>
+        <span class="candidate-scoreline">
+          <span>exp <em>${expr}</em></span>
+          <span>burden <em>${burden}</em></span>
+          <span>gc <em>${gc}</em></span>
+          <span>clean <em>${clean}</em></span>
+        </span>
+      </div>
+      <span class="candidate-composite" title="Composite score">${c.scores.composite.toFixed(2)}</span>
+    `;
+
+    li.addEventListener("click", () => selectCandidate(c.id));
+    list.appendChild(li);
+  }
+  $("candidatesCard").hidden = false;
+}
+
+/** Render the Pareto chart: x = expression, y = low_burden, both in [0,1]. */
+function renderParetoChart(candidates, selectedId) {
+  const axes = $("paretoAxes");
+  const points = $("paretoPoints");
+  axes.innerHTML = "";
+  points.innerHTML = "";
+
+  const W = 480, H = 320;
+  const PAD = { l: 50, r: 28, t: 22, b: 44 };
+  const px = (x) => PAD.l + x * (W - PAD.l - PAD.r);
+  const py = (y) => H - PAD.b - y * (H - PAD.t - PAD.b);
+
+  // grid + axes
+  for (let t = 0; t <= 1.0001; t += 0.25) {
+    axes.appendChild(svgEl("line", {
+      x1: px(t), y1: py(0), x2: px(t), y2: py(1), class: "pareto-grid",
+    }));
+    axes.appendChild(svgEl("line", {
+      x1: px(0), y1: py(t), x2: px(1), y2: py(t), class: "pareto-grid",
+    }));
+    const xt = svgEl("text", {
+      x: px(t), y: py(0) + 14, "text-anchor": "middle", class: "pareto-tick-label",
+    });
+    xt.textContent = t.toFixed(2);
+    axes.appendChild(xt);
+    const yt = svgEl("text", {
+      x: px(0) - 8, y: py(t) + 3, "text-anchor": "end", class: "pareto-tick-label",
+    });
+    yt.textContent = t.toFixed(2);
+    axes.appendChild(yt);
+  }
+  axes.appendChild(svgEl("line", {
+    x1: px(0), y1: py(0), x2: px(1), y2: py(0), class: "pareto-axis",
+  }));
+  axes.appendChild(svgEl("line", {
+    x1: px(0), y1: py(0), x2: px(0), y2: py(1), class: "pareto-axis",
+  }));
+
+  // Pareto front line (sorted by x, only Pareto points)
+  const front = candidates
+    .filter((c) => c.is_pareto)
+    .map((c) => ({ id: c.id, x: c.scores.expression, y: c.scores.low_burden }))
+    .sort((a, b) => a.x - b.x);
+  if (front.length >= 2) {
+    const d = front
+      .map((p, i) => `${i ? "L" : "M"} ${px(p.x)} ${py(p.y)}`)
+      .join(" ");
+    axes.appendChild(svgEl("path", { d, class: "pareto-front-line" }));
+  }
+
+  const tip = $("paretoTip");
+  const frame = tip.parentElement;
+
+  for (const c of candidates) {
+    const cx = px(c.scores.expression);
+    const cy = py(c.scores.low_burden);
+    const isSelected = c.id === selectedId;
+    const r = isSelected ? 8 : 6;
+
+    const circle = svgEl("circle", {
+      cx, cy, r,
+      class: `pareto-point${c.is_pareto ? " is-pareto" : ""}${isSelected ? " is-selected" : ""}`,
+    });
+    circle.addEventListener("mouseenter", (ev) => {
+      tip.hidden = false;
+      tip.innerHTML =
+        `<strong>${escapeHtml(c.strategy_name || c.id)}</strong><br/>` +
+        `composite ${c.scores.composite.toFixed(3)}<br/>` +
+        `exp ${c.scores.expression.toFixed(2)} · burden ${(1 - c.scores.low_burden).toFixed(2)}<br/>` +
+        `gc ${c.scores.gc_balance.toFixed(2)} · clean ${c.scores.cleanliness.toFixed(2)}`;
+      moveParetoTip(tip, frame, ev);
+    });
+    circle.addEventListener("mousemove", (ev) => moveParetoTip(tip, frame, ev));
+    circle.addEventListener("mouseleave", () => { tip.hidden = true; });
+    circle.addEventListener("click", () => selectCandidate(c.id));
+    points.appendChild(circle);
+
+    const lbl = svgEl("text", {
+      x: cx + 9, y: cy - 9, class: "pareto-point-label",
+    });
+    lbl.textContent = `#${c.rank}`;
+    points.appendChild(lbl);
+  }
+
+  $("paretoSection").hidden = false;
+}
+
+function moveParetoTip(tip, frame, ev) {
+  const rect = frame.getBoundingClientRect();
+  tip.style.left = `${ev.clientX - rect.left + 12}px`;
+  tip.style.top = `${ev.clientY - rect.top + 12}px`;
+}
+
+/** Switch the active candidate and re-render every dependent surface. */
+function selectCandidate(id, { animatePasses = false } = {}) {
+  const cand = getCandidate(id);
+  if (!cand) return;
+  state.selectedId = id;
+
+  // Assistant bubble: replace thought instantly (no streaming on switch).
+  $("thoughtText").textContent = cand.thought;
+
+  // Plasmid map + sequence + metrics tied to selected candidate.
+  const seq = cleanSeq(cand.sequence);
+  lastSequence = seq;
+  renderPlasmid(seq, cand.strategy || "compiled_construct");
+  $("mLen").textContent = `${seq.length} bp`;
+  $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
+  const cai = passMetricFor(cand.passes, "cai");
+  $("mTm").textContent = cai ? `CAI ${cai}` : `${wallaceTm(seq).toFixed(0)} °C`;
+  $("seqPre").textContent = seq;
+
+  renderPasses(cand.passes, { animate: animatePasses });
+  renderCandidates(state.candidates, id);
+  renderParetoChart(state.candidates, id);
+
+  // Reveal everything that's gated until a result exists.
+  $("metrics").hidden = false;
+  $("seqCard").hidden = false;
+}
 
 async function compile() {
   const prompt = $("prompt").value.trim();
@@ -491,6 +745,13 @@ async function compile() {
   $("thoughtText").textContent = "Calling compiler…";
   badge.textContent = "Running";
   badge.classList.remove("done");
+  $("metrics").hidden = true;
+  $("seqCard").hidden = true;
+  $("passesCard").hidden = true;
+  $("candidatesCard").hidden = true;
+  $("paretoSection").hidden = true;
+  $("passesList").innerHTML = "";
+  $("candidatesList").innerHTML = "";
 
   btn.disabled = true;
   hint.textContent = "Compiling…";
@@ -499,29 +760,50 @@ async function compile() {
     const res = await fetch("/api/compile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, n: 4 }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
 
     setModelLabel(data.model);
-    const thought = data.thought;
-    const sequence = cleanSeq(data.sequence);
 
-    lastSequence = sequence;
-    renderPlasmid(sequence, "compiled_construct");
-    $("mLen").textContent = `${sequence.length} bp`;
-    $("mGc").textContent = `${gcPercent(sequence).toFixed(2)}%`;
-    $("mTm").textContent = `${wallaceTm(sequence).toFixed(1)} °C`;
-    $("seqPre").textContent = sequence;
+    state.candidates = Array.isArray(data.candidates) ? data.candidates : [];
+    if (!state.candidates.length) throw new Error("Compiler returned no candidates");
+
+    state.selectedId = data.best_id || state.candidates[0].id;
+    const best = getCandidate(state.selectedId);
+
+    const extrasMeta = document.getElementById("extrasMeta");
+    if (extrasMeta) {
+      const paretoCount = state.candidates.filter((c) => c.is_pareto).length;
+      extrasMeta.textContent = `${state.candidates.length} candidates · ${paretoCount}★ · ${data.model}`;
+    }
+
+    // Wire up everything for the BEST candidate first; reveal as we go.
+    const seq = cleanSeq(best.sequence);
+    lastSequence = seq;
+    renderPlasmid(seq, best.strategy || "compiled_construct");
+    $("mLen").textContent = `${seq.length} bp`;
+    $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
+    const cai = passMetricFor(best.passes, "cai");
+    $("mTm").textContent = cai ? `CAI ${cai}` : `${wallaceTm(seq).toFixed(0)} °C`;
+    $("seqPre").textContent = seq;
+
+    // Animate compiler passes + render candidates/Pareto in parallel with thought stream.
+    renderPasses(best.passes, { animate: true });
+    renderCandidates(state.candidates, state.selectedId);
+    renderParetoChart(state.candidates, state.selectedId);
 
     const thoughtEl = $("thoughtText");
     thoughtEl.textContent = "";
     badge.textContent = "Reasoning";
-    await streamThought(thoughtEl, thought);
+    await streamThought(thoughtEl, best.thought);
     badge.textContent = "Done";
     badge.classList.add("done");
-    hint.textContent = "Ready";
+    hint.textContent = `Ready · ${state.candidates.length} candidates`;
+
+    $("metrics").hidden = false;
+    $("seqCard").hidden = false;
     $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
   } catch (e) {
     console.error(e);
@@ -558,16 +840,23 @@ $("dlGb").addEventListener("click", () => {
   if (!lastSequence) return;
   downloadText("compiled_sequence.gb", toGenbank(lastSequence));
 });
-$("copySeq").addEventListener("click", async () => {
+$("seqCopyBtn").addEventListener("click", async () => {
   if (!lastSequence) return;
+  const btn = $("seqCopyBtn");
+  const label = $("seqCopyLabel");
   try {
     await navigator.clipboard.writeText(lastSequence);
-    $("copySeq").textContent = "Copied";
+    label.textContent = "Copied";
+    btn.classList.add("is-copied");
     setTimeout(() => {
-      $("copySeq").textContent = "Copy";
+      label.textContent = "Copy";
+      btn.classList.remove("is-copied");
     }, 1500);
   } catch {
-    $("copySeq").textContent = "Failed";
+    label.textContent = "Failed";
+    setTimeout(() => {
+      label.textContent = "Copy";
+    }, 1500);
   }
 });
 

@@ -1,15 +1,33 @@
 #!/usr/bin/env python3
-"""Serve the web UI and /api/compile for mock or future Gemma inference (stdlib only)."""
+"""DGene compiler server — UI + /api/compile orchestration (stdlib only).
+
+Pipeline per /api/compile request:
+
+  1. inference backend → N candidate (thought, sequence) pairs
+  2. compiler passes   → per-candidate diagnostics + score-bearing metrics
+  3. ranker            → composite score + Pareto front
+  4. response          → candidates[] sorted by composite, with `is_pareto`
+
+The backend is selected once at server startup so the (potentially heavy)
+GGUF model isn't re-loaded per request. ``DGENE_GGUF_PATH=/path/to/model.gguf``
+flips inference from MockBackend → GGUFBackend without code changes.
+"""
 from __future__ import annotations
 
 import errno
 import json
 import os
 import sys
+import threading
+import traceback
+from dataclasses import asdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-from inference import parse_thought_and_sequence, run_mock_inference
+from inference import get_backend, parse_thought_and_sequence, run_mock_inference  # noqa: F401
+from passes import passes_to_dicts, run_passes
+from ranker import rank, score_candidate, scores_to_dict
+
 
 WEB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -24,31 +42,65 @@ MIME = {
 }
 
 
-def _compile(prompt: str) -> dict:
-    """Run compiler backend.
+# ---------------------------------------------------------------------------
+# Backend held as a singleton; lazy-init under a lock so first request doesn't
+# race a slow GGUF load.
+# ---------------------------------------------------------------------------
 
-    Replace ``run_mock_inference`` with a Gemma (or vLLM / OpenAI) call that returns
-    the same training format::
+_BACKEND = None
+_BACKEND_LOCK = threading.Lock()
 
-        <|channel>thought
-        ...reasoning...
-        <channel|>
-        DNA...
 
-    then keep ``parse_thought_and_sequence`` unchanged.
-    """
-    raw = run_mock_inference(prompt)
-    thought, sequence = parse_thought_and_sequence(raw)
+def _backend():
+    global _BACKEND
+    if _BACKEND is None:
+        with _BACKEND_LOCK:
+            if _BACKEND is None:
+                _BACKEND = get_backend()
+    return _BACKEND
+
+
+# ---------------------------------------------------------------------------
+# Compile pipeline
+# ---------------------------------------------------------------------------
+
+
+def _compile(prompt: str, n: int = 4) -> dict:
+    backend = _backend()
+    candidates = backend.generate(prompt, n=n)
+
+    out = []
+    for cand in candidates:
+        passes = run_passes(cand.sequence)
+        scores = score_candidate(passes, len(cand.sequence))
+        out.append({
+            "id": cand.candidate_id,
+            "thought": cand.thought,
+            "sequence": cand.sequence,
+            "strategy": cand.strategy,
+            "strategy_name": cand.strategy_name,
+            "passes": passes_to_dicts(passes),
+            "scores": scores_to_dict(scores),
+        })
+
+    ranked = rank(out)
+    best_id = ranked[0]["id"] if ranked else None
+
     return {
-        "thought": thought,
-        "sequence": sequence,
-        "raw": raw,
-        "model": "mock",
+        "candidates": ranked,
+        "best_id": best_id,
+        "model": getattr(backend, "name", "unknown"),
+        "prompt": prompt,
     }
 
 
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DGeneCompiler/1.0"
+    server_version = "DGeneCompiler/2.0"
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -82,15 +134,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Invalid JSON body"}, 400)
             return
         prompt = str(payload.get("prompt", ""))
+        n = int(payload.get("n", 4))
+        n = max(1, min(8, n))
         try:
-            result = _compile(prompt)
+            result = _compile(prompt, n=n)
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             self._json({"error": str(exc)}, 500)
             return
         self._json(result)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/health":
+            self._json({"status": "ok", "model": getattr(_backend(), "name", "unknown")})
+            return
         if path in ("/", ""):
             path = "/index.html"
         rel = path.lstrip("/")
@@ -114,6 +172,11 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"{self.address_string()} — {fmt % args}\n")
 
 
+# ---------------------------------------------------------------------------
+# Boot
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
     base_port = int(os.environ.get("PORT", "8765"))
     if not os.path.isdir(WEB_ROOT):
@@ -123,10 +186,10 @@ def main() -> None:
     httpd = None
     port = base_port
     for offset in range(32):
-        candidate = base_port + offset
+        cand = base_port + offset
         try:
-            httpd = HTTPServer(("", candidate), Handler)
-            port = candidate
+            httpd = HTTPServer(("", cand), Handler)
+            port = cand
             break
         except OSError as exc:
             if exc.errno not in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", -1)):
@@ -140,12 +203,17 @@ def main() -> None:
                 sys.exit(1)
 
     if port != base_port:
-        print(
-            f"Port {base_port} in use; listening on {port} instead.",
-            file=sys.stderr,
-        )
+        print(f"Port {base_port} in use; listening on {port} instead.", file=sys.stderr)
+
+    # Pre-warm the backend so first compile isn't slow on cold start.
+    try:
+        b = _backend()
+        print(f"[server] Backend ready: {getattr(b, 'name', 'unknown')}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[server] Backend init failed at boot: {exc}", file=sys.stderr)
+
     print(f"DGene compiler UI: http://127.0.0.1:{port}/")
-    print("API: POST /api/compile  JSON {{\"prompt\": \"...\"}}")
+    print('API: POST /api/compile  JSON {"prompt": "...", "n": 4}')
     httpd.serve_forever()
 
 
