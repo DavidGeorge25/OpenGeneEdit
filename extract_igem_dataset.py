@@ -17,11 +17,14 @@ FIELD_RE = re.compile(
 )
 
 
-def normalize_part_type(value: str):
+def normalize_part_type(value: str, categories: str = ""):
     v = value.strip().lower()
+    c = categories.strip().lower()
     if not v:
         return None
-    if v.startswith("promoter"):
+    if v.startswith("promoter") or v == "regulatory" or v == "generator":
+        return "Promoter"
+    if "generator" in c:
         return "Promoter"
     if v == "rbs":
         return "RBS"
@@ -94,7 +97,10 @@ def main():
                 seen_rows += 1
                 row = parse_row_fields("".join(row_lines))
 
-                part_type = normalize_part_type(row.get("part_type", ""))
+                part_type = normalize_part_type(
+                    row.get("part_type", ""),
+                    row.get("categories", ""),
+                )
                 if part_type is None:
                     continue
 
