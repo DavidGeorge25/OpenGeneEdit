@@ -266,6 +266,11 @@ kbd {
     border-top: 1px solid var(--line);
     max-height: none;
   }
+
+  /* Two-row layout: cap the compiler-output strip so it scrolls internally */
+  body.in-workspace .split {
+    grid-template-rows: minmax(0, 1fr) minmax(0, min(38vh, 360px));
+  }
 }
 
 @media (max-width: 900px) {
