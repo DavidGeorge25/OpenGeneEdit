@@ -334,6 +334,50 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
     raise ValueError("Could not parse thought and DNA sequence from model output.")
 
 
+_PARAGRAPH_QUOTED_RE = re.compile(
+    r'paragraph\s*:\s*["\u201c]([^"\u201d]*)["\u201d]',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def sanitize_thought_for_display(thought: str) -> str:
+    """Turn parsed channel-thought text into a single readable paragraph for UI / RAG.
+
+    Models sometimes wrap the real sentence in junk like ``* Paragraph: "..." * Marker:``,
+    fences, or stray backticks — strip that without dropping BBa / J23100-style names.
+    """
+
+    t = (thought or "").strip()
+    if not t:
+        return t
+    t = _strip_markdown_fences(t)
+    m = _PARAGRAPH_QUOTED_RE.search(t)
+    if m:
+        inner = " ".join(m.group(1).split())
+        if inner:
+            return inner
+    lines_out: List[str] = []
+    for line in t.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r"^[\s*`#*_\-]+$", s):
+            continue
+        if re.match(r"^\*?\s*marker\s*:", s, re.IGNORECASE):
+            continue
+        if re.match(r"^\*?\s*paragraph\s*:", s, re.IGNORECASE):
+            s2 = re.sub(r"^\*?\s*paragraph\s*:\s*", "", s, flags=re.IGNORECASE).strip()
+            s2 = s2.strip("\"'“”").strip()
+            if s2:
+                lines_out.append(s2)
+            continue
+        lines_out.append(s)
+    merged = " ".join(lines_out) if lines_out else t
+    merged = re.sub(r"[`]+", " ", merged)
+    merged = re.sub(r"\s+", " ", merged).strip()
+    return merged
+
+
 _FORMAT_RETRY_SUFFIX = (
     "\n\n**Format correction (required):** Your entire reply must be ONLY these four lines "
     "(plus optional single blank line after the thought paragraph): "
@@ -380,13 +424,16 @@ _GEMINI_API_BASE = (
 _GEMINI_STOP_SEQUENCES = ["</circuit>"]
 
 _GEMINI_SYSTEM_STOP_INSTRUCTION = (
-    "You are the DGene DNA compiler. The complete reply is ONLY: the literal first line "
-    "<|channel>thought, then one short paragraph (no bullets, no * or - list markers, no "
-    "\"Wait,\" self-dialogue, no checklists), then a line <channel|>, then ONE line of "
-    "DNA using only A/C/G/T with NO spaces inside that line, then a line </circuit> and "
-    "nothing after. First character must be `<`. Naming iGEM ids (J23100, B0034, BBa_…) "
-    "belongs only inside the paragraph. Never output \"simulated\" or fragmentary cds; "
-    "emit a continuous sequence. Do not use triple backticks or code fences."
+    "You are the DGene DNA compiler. Begin immediately: the FIRST characters you emit must "
+    "be the literal text <|channel>thought — no preamble, greeting, markdown, bullets, "
+    "asterisks, headings, or hidden planning. Never write lines starting with `*` or `-` "
+    "or numbered lists; never use \"Wait,\" or step-checklists. "
+    "The complete reply is ONLY: line <|channel>thought, then one short paragraph "
+    "(≤5 sentences, single paragraph), then line <channel|>, then ONE line of DNA "
+    "(A/C/G/T only, no spaces inside that line), then line </circuit> and STOP — nothing "
+    "after </circuit>. First byte must be `<`. iGEM names (J23100, B0034, BBa_…) belong "
+    "only in that paragraph. Emit a continuous DNA line long enough for the design (no "
+    "ellipsis). No triple backticks or code fences. No meta-labels like \"Paragraph:\"."
 )
 
 # Verbatim schema we show in prompts AND echo on parse failures so users can see exactly what
@@ -416,6 +463,8 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "output ONE DNA construct solution. Your reply must match the worked example below "
         "exactly in structure — no other text, no markdown fences, no JSON, no YAML, no FASTA "
         "header.\n\n"
+        "**Speed rule:** Answer in one pass. Do not plan, enumerate parts in bullets, or repeat "
+        "the rules below — go straight to the four-line template.\n\n"
         "**User brief**\n"
         f"{brief}\n\n"
         "**Worked example — copy this structure verbatim, then replace ONLY (a) the reasoning "
@@ -440,10 +489,11 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "the closing angle bracket.\n"
         "3. The DNA line must be one continuous string of A, C, G, T (uppercase, ≥12 nt). "
         "No spaces, no line breaks inside the DNA, no numbering, no FASTA `>` line.\n"
-        "4. End with </circuit> on its own line and stop immediately after that.\n"
+        "4. End with </circuit> on its own line and stop immediately after that — the API "
+        "uses this as a stop sequence; emitting </circuit> ends generation.\n"
         "5. Never output triple backticks anywhere in the reply.\n"
-        "6. Do not stall with outlines, self-corrections, or \"since I cannot fit…\" essays. "
-        "Finish the thought paragraph, then output the DNA and </circuit> within a single reply.\n"
+        "6. No outlines, self-dialogue, \"Wait\", or meta-commentary — one short paragraph "
+        "then DNA then </circuit>.\n"
         "7. Never use markdown bullets (`*`, `-`, numbered lists) or nested indentation — "
         "only plain sentences in the thought paragraph.\n"
         "8. The DNA line is a single token run: no space characters anywhere in it.\n"
@@ -482,9 +532,10 @@ def _gemini_max_output_tokens() -> int:
     """``generationConfig.maxOutputTokens`` — override with ``DGENE_GEMINI_MAX_OUTPUT``."""
 
     raw = os.environ.get("DGENE_GEMINI_MAX_OUTPUT", "").strip()
-    # 32k encourages endless bullet-planning without emitting </circuit>; compile needs
-    # ~1–20k bp DNA + short reasoning. Override with DGENE_GEMINI_MAX_OUTPUT for huge designs.
-    default = 16384
+    # High caps let the model burn thousands of tokens in bullet-planning before ``</circuit>``;
+    # a moderate default keeps typical compiles fast while still allowing multi‑kbp DNA + reasoning.
+    # Raise DGENE_GEMINI_MAX_OUTPUT (e.g. 16384–32768) for unusually long single-piece constructs.
+    default = 8192
     if not raw:
         return default
     try:
@@ -754,14 +805,16 @@ def _gemini_stream_collect(
     if hb_thread is not None:
         hb_thread.start()
     try:
+        stream_done = False
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             line_buf = b""
-            while True:
+            early_close = _gemini_env_bool("DGENE_GEMINI_STREAM_EARLY_CLOSE", True)
+            while not stream_done:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
                 line_buf += chunk
-                while b"\n" in line_buf:
+                while b"\n" in line_buf and not stream_done:
                     raw_line, line_buf = line_buf.split(b"\n", 1)
                     line = raw_line.decode("utf-8", errors="replace").strip().replace("\r", "")
                     if not line or line.startswith(":"):
@@ -770,6 +823,7 @@ def _gemini_stream_collect(
                         continue
                     payload_raw = line[5:].strip()
                     if payload_raw == "[DONE]":
+                        stream_done = True
                         break
                     try:
                         obj = json.loads(payload_raw)
@@ -784,6 +838,18 @@ def _gemini_stream_collect(
                     if piece:
                         accumulated += piece
                         compile_stream_update(debug_ctx or "stream", accumulated)
+                        if early_close and "</circuit>" in accumulated:
+                            try:
+                                parse_thought_and_sequence(accumulated)
+                            except ValueError:
+                                pass
+                            else:
+                                infer_debug_log(
+                                    f"{tag}SSE early close · valid parse after </circuit> "
+                                    f"({len(accumulated)} chars)"
+                                )
+                                stream_done = True
+                                break
     except urllib.error.HTTPError as exc:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         err_body = ""
@@ -1015,13 +1081,14 @@ class GeminiBackend:
             infer_debug_log(
                 f"{ctx} done seq_len={len(sequence)} thought_chars={len(thought)}"
             )
+            thought_ui = sanitize_thought_for_display(thought)
             return Candidate(
                 candidate_id=f"cand_{i}",
-                thought=thought,
+                thought=thought_ui,
                 sequence=sequence,
                 strategy=f"T{temperature:g}",
                 strategy_name=f"Gemma hosted (T={temperature:g})",
-                raw=_canonical_raw(thought, sequence),
+                raw=_canonical_raw(thought_ui, sequence),
             )
 
         parallel = _gemini_env_bool("DGENE_GEMINI_PARALLEL", True) and n > 1
@@ -1036,10 +1103,11 @@ class GeminiBackend:
             return [one(i) for i in range(n)]
 
         try:
-            # Fewer concurrent streams reduces 429 / flaky TLS when four connections open at once.
-            max_workers = int(os.environ.get("DGENE_GEMINI_MAX_WORKERS", "2").strip() or "2")
+            # Default 4 matches typical n=4 so all candidates run in one wall-clock wave. Set
+            # DGENE_GEMINI_MAX_WORKERS=2 if you hit 429 / flaky TLS with many parallel streams.
+            max_workers = int(os.environ.get("DGENE_GEMINI_MAX_WORKERS", "4").strip() or "4")
         except ValueError:
-            max_workers = 2
+            max_workers = 4
         max_workers = max(1, min(max_workers, n))
         infer_debug_log(f"ThreadPoolExecutor max_workers={max_workers}")
         g0 = time.perf_counter()
@@ -1118,9 +1186,10 @@ class GGUFBackend:
                     "(expected `<|channel>thought … <channel|>` then ATCG). "
                     "See [dgene/infer] log lines above for the raw output that failed."
                 ) from exc
+            thought_ui = sanitize_thought_for_display(thought)
             out.append(Candidate(
                 candidate_id=f"cand_{i}",
-                thought=thought,
+                thought=thought_ui,
                 sequence=sequence,
                 strategy=f"sample_T{temps[i % len(temps)]}",
                 strategy_name=f"Gemma sample (T={temps[i % len(temps)]})",

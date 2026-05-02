@@ -3,7 +3,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from inference import parse_thought_and_sequence, run_inference
+from inference import parse_thought_and_sequence, run_inference, sanitize_thought_for_display
 from visualizer import generate_interactive_plasmid_plot
 
 
@@ -113,6 +113,7 @@ if submit:
         status = st.status("Running compiler backend...", expanded=False)
         raw_output = run_inference(prompt)
         thought_text, dna_sequence = parse_thought_and_sequence(raw_output)
+        thought_text = sanitize_thought_for_display(thought_text)
         dna_sequence, rag_detail = _apply_rag_substitution(thought_text, dna_sequence)
         if rag_detail.get("applied"):
             st.caption(

@@ -446,6 +446,19 @@ body.in-workspace .split {
   color: var(--text);
 }
 
+.thought-eyebrow {
+  margin: 0 0 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+
+.bubble-assistant--reasoning {
+  margin-top: 0.15rem;
+}
+
 /* ─── Compile pipeline loading (in-chat) ─────────────────────────────────── */
 
 .compile-pipeline {
@@ -1243,6 +1256,66 @@ body.in-workspace .artifact-body > * {
   max-width: 200px;
   line-height: 1.4;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.tooltip.tooltip--rich {
+  pointer-events: auto;
+  max-width: min(340px, calc(28vw + 180px));
+  padding: 0.55rem 0.65rem 0.6rem;
+}
+
+.feature-tooltip-head {
+  margin-bottom: 0.35rem;
+  line-height: 1.45;
+}
+
+.feature-tooltip-seq {
+  margin: 0 0 0.45rem;
+  padding: 0.4rem 0.45rem;
+  max-height: 7.5rem;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.feature-tooltip-note {
+  opacity: 0.85;
+  font-size: 0.7rem;
+}
+
+.feature-tooltip-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  margin: 0;
+  padding: 0.32rem 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.feature-tooltip-copy:hover {
+  filter: brightness(0.96);
+}
+
+.feature-tooltip-copy.is-copied {
+  background: #bbf7d0;
+  color: #14532d;
+}
+
+.plasmid-site-hit.is-active,
+.plasmid-feature-hit {
+  cursor: pointer;
 }
 
 .tooltip strong {

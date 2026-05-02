@@ -274,8 +274,9 @@ function renderTicks(L) {
   }
 }
 
-function renderRestrictionSites(sites, L, tip, frame) {
+function renderRestrictionSites(sites, L, sequence, tip, frame) {
   const g = $("plasmidSites");
+  const seq = String(sequence || "");
   g.innerHTML = "";
   for (const site of sites) {
     const a = site.position;
@@ -294,16 +295,38 @@ function renderRestrictionSites(sites, L, tip, frame) {
       transform: `rotate(${rotateDeg} ${lp.x} ${lp.y})`,
       "text-anchor": anchor,
       "dominant-baseline": "middle",
-      class: "plasmid-site-label",
+      class: "plasmid-site-label plasmid-site-hit",
     });
     txt.textContent = `${site.name} (${site.position})`;
+    const motif = ENZYMES[site.name] || "";
+    const siteSeg = motif && seq.length
+      ? plasmidSegmentSeq(seq, site.position, site.position + motif.length - 1)
+      : "";
     txt.addEventListener("mouseenter", (ev) => {
+      cancelPlasmidTipHide();
+      txt.classList.add("is-active");
+      tip.classList.add("tooltip--rich");
       tip.hidden = false;
-      tip.innerHTML = `<strong>${site.name}</strong><br/>cut site · ${site.position} bp`;
+      if (motif && siteSeg) {
+        const prev = formatSeqTooltipPreview(siteSeg, 120);
+        tip.innerHTML =
+          `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
+          `site · ${site.position} bp · ${escapeHtml(motif)} (5′→3′ on top strand)</div>` +
+          `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
+          `<button type="button" class="feature-tooltip-copy" data-copy-seq="${escapeHtml(siteSeg)}">` +
+          `<span class="feature-tooltip-copy-label">Copy</span> site</button>`;
+      } else {
+        tip.innerHTML =
+          `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
+          `cut site · ${site.position} bp</div>`;
+      }
       moveTooltipAt(tip, frame, ev);
     });
     txt.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
-    txt.addEventListener("mouseleave", () => { tip.hidden = true; });
+    txt.addEventListener("mouseleave", () => {
+      txt.classList.remove("is-active");
+      schedulePlasmidTipHide(tip);
+    });
     g.appendChild(txt);
   }
 }
@@ -314,6 +337,90 @@ function moveTooltipAt(tip, frame, ev) {
   tip.style.top = `${ev.clientY - rect.top + 12}px`;
 }
 
+let plasmidTipHideTimer = null;
+
+function cancelPlasmidTipHide() {
+  if (plasmidTipHideTimer) {
+    clearTimeout(plasmidTipHideTimer);
+    plasmidTipHideTimer = null;
+  }
+}
+
+function schedulePlasmidTipHide(tip) {
+  cancelPlasmidTipHide();
+  plasmidTipHideTimer = setTimeout(() => {
+    tip.hidden = true;
+    document
+      .querySelectorAll(".plasmid-seg.is-active, .plasmid-site-hit.is-active")
+      .forEach((el) => el.classList.remove("is-active"));
+  }, 220);
+}
+
+/** Bind once per viz frame: sticky hover for DNA tooltips + copy control. */
+function bindPlasmidTipFrame(tip, frame) {
+  if (!tip || !frame || frame.dataset.plasmidTipBound === "1") return;
+  frame.dataset.plasmidTipBound = "1";
+  tip.addEventListener("mouseenter", cancelPlasmidTipHide);
+  tip.addEventListener("mouseleave", () => {
+    tip.hidden = true;
+    document
+      .querySelectorAll(".plasmid-seg.is-active, .plasmid-site-hit.is-active")
+      .forEach((el) => el.classList.remove("is-active"));
+  });
+  frame.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".feature-tooltip-copy");
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const raw = btn.getAttribute("data-copy-seq") || "";
+    if (!raw) return;
+    try {
+      await navigator.clipboard.writeText(raw);
+      const lab = btn.querySelector(".feature-tooltip-copy-label");
+      if (lab) lab.textContent = "Copied";
+      btn.classList.add("is-copied");
+      setTimeout(() => {
+        if (lab) lab.textContent = "Copy";
+        btn.classList.remove("is-copied");
+      }, 1600);
+    } catch (err) {
+      console.warn(err);
+    }
+  });
+}
+
+function plasmidSegmentSeq(seq, start, end) {
+  const s = String(seq || "");
+  if (!s.length) return "";
+  const i0 = Math.max(0, Number(start) - 1);
+  const i1 = Math.min(s.length, Number(end));
+  if (i1 <= i0) return "";
+  return s.slice(i0, i1);
+}
+
+function formatSeqTooltipPreview(seq, maxPreviewChars) {
+  const cap = maxPreviewChars > 80 ? maxPreviewChars : 360;
+  const piece = seq.length > cap ? seq.slice(0, cap) : seq;
+  const w = 10;
+  const parts = [];
+  for (let i = 0; i < piece.length; i += w) parts.push(piece.slice(i, i + w));
+  let out = parts.join(" ");
+  if (seq.length > cap) out += `\n… ${seq.length} bp total (copy gets full segment)`;
+  return out;
+}
+
+function buildFeatureTooltipHtml(f, subHuman, seg) {
+  const safeSegAttr = escapeHtml(seg);
+  const prev = formatSeqTooltipPreview(seg, 400);
+  return (
+    `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
+    `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand</div>` +
+    `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
+    `<button type="button" class="feature-tooltip-copy" data-copy-seq="${safeSegAttr}">` +
+    `<span class="feature-tooltip-copy-label">Copy</span> segment</button>`
+  );
+}
+
 function humanizeFeatureSub(sub) {
   const s = String(sub || "feature").toLowerCase();
   if (s === "rbs") return "RBS";
@@ -321,9 +428,10 @@ function humanizeFeatureSub(sub) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function renderFeaturesAndLabels(features, L, tip, frame) {
+function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
   const arcs = $("plasmidRotate");
   const labels = $("plasmidLabels");
+  const seq = String(sequence || "");
   arcs.innerHTML = "";
   labels.innerHTML = "";
 
@@ -359,7 +467,7 @@ function renderFeaturesAndLabels(features, L, tip, frame) {
     const tName = svgEl("text", {
       x: pText.x + dx, y: pText.y - 2,
       "text-anchor": anchor,
-      class: "plasmid-feature-label",
+      class: "plasmid-feature-label plasmid-feature-hit",
     });
     tName.textContent = f.label;
     labels.appendChild(tName);
@@ -367,25 +475,45 @@ function renderFeaturesAndLabels(features, L, tip, frame) {
     const tSub = svgEl("text", {
       x: pText.x + dx, y: pText.y + 12,
       "text-anchor": anchor,
-      class: "plasmid-feature-sub",
+      class: "plasmid-feature-sub plasmid-feature-hit",
     });
     const subHuman = humanizeFeatureSub(f.sub);
     tSub.textContent = `${subHuman} · ${f.start}–${f.end}`;
     labels.appendChild(tSub);
 
-    const onEnter = (ev) => {
+    const seg = plasmidSegmentSeq(seq, f.start, f.end);
+    const showSeq = seg.length > 0;
+
+    const showTip = (ev) => {
+      cancelPlasmidTipHide();
       document.querySelectorAll(".plasmid-seg.is-active").forEach((el) => el.classList.remove("is-active"));
       path.classList.add("is-active");
+      tip.classList.add("tooltip--rich");
       tip.hidden = false;
-      tip.innerHTML = `<strong>${f.label}</strong> · ${subHuman}<br/>${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand`;
+      tip.innerHTML = showSeq
+        ? buildFeatureTooltipHtml(f, subHuman, seg)
+        : `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
+          `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand<br/>` +
+          `<span class="feature-tooltip-note">No sequence loaded for this map.</span></div>`;
       moveTooltipAt(tip, frame, ev);
     };
-    path.addEventListener("mouseenter", onEnter);
+
+    const onPathEnter = (ev) => showTip(ev);
+    path.addEventListener("mouseenter", onPathEnter);
     path.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
     path.addEventListener("mouseleave", () => {
       path.classList.remove("is-active");
-      tip.hidden = true;
+      schedulePlasmidTipHide(tip);
     });
+
+    for (const el of [tName, tSub]) {
+      el.addEventListener("mouseenter", (ev) => showTip(ev));
+      el.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
+      el.addEventListener("mouseleave", () => {
+        path.classList.remove("is-active");
+        schedulePlasmidTipHide(tip);
+      });
+    }
   }
 }
 
@@ -411,8 +539,9 @@ function renderPlasmid(sequence, name = "construct", mapSlots = null) {
   const sites = findRestrictionSites(sequence);
 
   renderTicks(L);
-  renderFeaturesAndLabels(features, L, tip, frame);
-  renderRestrictionSites(sites, L, tip, frame);
+  bindPlasmidTipFrame(tip, frame);
+  renderFeaturesAndLabels(features, L, sequence, tip, frame);
+  renderRestrictionSites(sites, L, sequence, tip, frame);
 }
 
 function attachPlasmidNav(svg, viewport) {
@@ -492,6 +621,10 @@ function showLanding() {
   $("statusHint").textContent = "⌘ or Ctrl + Enter to compile";
   $("userBubble").hidden = true;
   $("thoughtText").textContent = "";
+  const teLand = $("thoughtEyebrow");
+  const twLand = $("thoughtWrap");
+  if (teLand) teLand.hidden = false;
+  if (twLand) twLand.hidden = false;
   const badge = $("streamBadge");
   badge.textContent = "…";
   badge.classList.remove("done");
@@ -960,7 +1093,8 @@ function startLiveCompilePipeline() {
   stopCompilePipelineVisual();
 
   const pipe = $("compilePipeline");
-  const thought = $("thoughtText");
+  const thoughtEyebrow = $("thoughtEyebrow");
+  const thoughtWrap = $("thoughtWrap");
   const fill = $("compilePipelineFill");
   const barWrap = document.querySelector(".compile-pipeline-bar");
   const ticker = $("compileTicker");
@@ -971,7 +1105,8 @@ function startLiveCompilePipeline() {
   const pre = $("compileDebugLog");
   const idleHint = $("terminalIdleHint");
 
-  if (thought) thought.hidden = true;
+  if (thoughtEyebrow) thoughtEyebrow.hidden = true;
+  if (thoughtWrap) thoughtWrap.hidden = true;
   if (idleHint) idleHint.hidden = true;
   if (pipe) {
     pipe.hidden = false;
@@ -1007,7 +1142,8 @@ function startLiveCompilePipeline() {
       pipe.hidden = true;
       pipe.setAttribute("aria-busy", "false");
     }
-    if (thought) thought.hidden = false;
+    if (thoughtEyebrow) thoughtEyebrow.hidden = false;
+    if (thoughtWrap) thoughtWrap.hidden = false;
     if (fill) fill.style.width = "4%";
     if (barWrap) barWrap.setAttribute("aria-valuenow", "0");
     if (elapsedEl) elapsedEl.textContent = "0:00";
@@ -1073,7 +1209,8 @@ function startCompilePipeline(numCandidates) {
   stopCompilePipelineVisual();
 
   const pipe = $("compilePipeline");
-  const thought = $("thoughtText");
+  const thoughtEyebrow = $("thoughtEyebrow");
+  const thoughtWrap = $("thoughtWrap");
   const fill = $("compilePipelineFill");
   const barWrap = document.querySelector(".compile-pipeline-bar");
   const ticker = $("compileTicker");
@@ -1082,7 +1219,8 @@ function startCompilePipeline(numCandidates) {
   const slot = $("compileStepSlot");
   const counter = $("compileStepCounter");
 
-  if (thought) thought.hidden = true;
+  if (thoughtEyebrow) thoughtEyebrow.hidden = true;
+  if (thoughtWrap) thoughtWrap.hidden = true;
   if (pipe) {
     pipe.hidden = false;
     pipe.setAttribute("aria-busy", "true");
@@ -1148,7 +1286,8 @@ function startCompilePipeline(numCandidates) {
       pipe.hidden = true;
       pipe.setAttribute("aria-busy", "false");
     }
-    if (thought) thought.hidden = false;
+    if (thoughtEyebrow) thoughtEyebrow.hidden = false;
+    if (thoughtWrap) thoughtWrap.hidden = false;
     if (fill) fill.style.width = "4%";
     if (barWrap) barWrap.setAttribute("aria-valuenow", "0");
     if (elapsedEl) elapsedEl.textContent = "0:00";

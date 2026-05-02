@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260501-layout-fullwidth" />
+    <link rel="stylesheet" href="/css/app.css?v=20260502-plasmid-tooltip" />
   </head>
   <body>
     <nav class="topnav">
@@ -79,13 +79,6 @@
               <span class="bubble-label">You</span>
               <p class="bubble-body" id="userBubbleText"></p>
             </article>
-            <article class="bubble bubble-assistant">
-              <span class="bubble-label">DGene</span>
-              <div class="bubble-body thought thought-wrap">
-                <p class="thought-main" id="thoughtText"></p>
-              </div>
-              <span class="bubble-status" id="streamBadge">…</span>
-            </article>
 
             <section class="chat-metrics" id="metrics" hidden aria-label="Construct stats">
               <span class="chat-metrics-label">Construct stats</span>
@@ -124,6 +117,15 @@
               </div>
               <pre class="chat-sequence-body" id="seqPre"></pre>
             </section>
+
+            <article class="bubble bubble-assistant bubble-assistant--reasoning" id="assistantReasoning">
+              <span class="bubble-label">DGene</span>
+              <p class="thought-eyebrow" id="thoughtEyebrow">Design reasoning</p>
+              <div class="bubble-body thought thought-wrap" id="thoughtWrap">
+                <p class="thought-main" id="thoughtText"></p>
+              </div>
+              <span class="bubble-status" id="streamBadge">…</span>
+            </article>
           </div>
         </aside>
 
@@ -142,7 +144,7 @@
           <div class="artifact-body">
             <div class="artifact-section">
               <h3 class="artifact-h3">Construct map</h3>
-              <p class="artifact-hint">Hover features · ⌘/Ctrl + scroll to zoom · drag to pan</p>
+              <p class="artifact-hint">Hover features or labels · copy DNA per segment · ⌘/Ctrl + scroll to zoom · drag to pan</p>
               <div class="viz-frame" id="vizFrame">
                 <svg
                   id="plasmidSvg"
@@ -285,6 +287,6 @@
       </div>
     </section>
 
-    <script src="/js/app.js?v=20260501-terminalpanel" type="module"></script>
+    <script src="/js/app.js?v=20260502-plasmid-tooltip" type="module"></script>
   </body>
 </html>
