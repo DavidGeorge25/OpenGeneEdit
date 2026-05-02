@@ -292,6 +292,19 @@ _SECTION_HEAD = re.compile(
 )
 _BULLET = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s+(.+)$")
 
+# Lines like ``Line 2: Design reasoning.``, ``Line k+1: \``, lone backticks/quotes —
+# these are prompt-skeleton echoes from Gemma copying our template wording back to us
+# and must never reach the registry as a query.
+_SKELETON_GARBAGE = re.compile(
+    r"^\s*line\s*\d+\b|"
+    r"^\s*line\s*k\s*[+\-]\s*\d+|"
+    r"^\s*lines?\s+\d+\s*\.\.\s*k\b|"
+    r"^\s*reasoning\s*:?\s*$|"
+    r"^\s*[`'\"\\]+\s*$|"
+    r"^\s*<[a-z|/][^>]*>\s*$",
+    re.IGNORECASE,
+)
+
 
 def extract_part_descriptions(thought: str) -> List[str]:
     """Heuristic extraction of per-part lines from free-form reasoning text."""
@@ -337,10 +350,11 @@ def extract_part_descriptions(thought: str) -> List[str]:
                 if len(piece) >= 12:
                     collected.append(piece)
 
-    # De-dupe while preserving order
     seen = set()
     out: List[str] = []
     for c in collected:
+        if _SKELETON_GARBAGE.search(c):
+            continue
         key = c.casefold()
         if key in seen:
             continue
@@ -355,6 +369,198 @@ _TYPE_PREFIX_CANON = {
     "cds": "CDS",
     "terminator": "Terminator",
 }
+
+# --- Per-part identifier extraction (drives high-precision RAG queries) ---------------
+# These regexes pull crisp part names out of free-form reasoning so each registry lookup
+# is "J23100 promoter" rather than a whole sentence — similarity scores jump from
+# ~0.25 (junk) into ~0.85+ (verified) for canonical iGEM parts.
+
+_BBA_RE = re.compile(r"\bBBa_[A-Z]\d{4,5}[a-zA-Z]?\b")
+_J_PROMOTER_RE = re.compile(r"\bJ\d{5}\b")
+_B_PART_RE = re.compile(r"\bB\d{4}\b")
+
+# (canonical_name, default_type_hint). Default applies when surrounding context doesn't
+# already yield a stronger type hint via :func:`_scan_window_for_type`.
+_GENERIC_PARTS: Tuple[Tuple[str, Optional[str]], ...] = (
+    ("sfGFP", "CDS"),
+    ("eGFP", "CDS"),
+    ("mGFP", "CDS"),
+    ("GFP", "CDS"),
+    ("mRFP1", "CDS"),
+    ("mRFP", "CDS"),
+    ("RFP", "CDS"),
+    ("mCherry", "CDS"),
+    ("YFP", "CDS"),
+    ("CFP", "CDS"),
+    ("luxAB", "CDS"),
+    ("luxCDABE", "CDS"),
+    ("lacI", "CDS"),
+    ("tetR", "CDS"),
+    ("araC", "CDS"),
+    ("cI", "CDS"),
+    ("PbrR", "CDS"),
+    ("lacO", None),
+    ("tetO", None),
+    ("PbrA", "Promoter"),
+    ("pBAD", "Promoter"),
+    ("pTet", "Promoter"),
+    ("pLac", "Promoter"),
+    ("Plac", "Promoter"),
+    ("pTrc", "Promoter"),
+    ("Ptrc", "Promoter"),
+    ("pT7", "Promoter"),
+    ("T7", "Promoter"),
+)
+
+
+_TYPE_KEYWORDS: Tuple[Tuple[str, str], ...] = (
+    ("promoter", "Promoter"),
+    ("promotor", "Promoter"),
+    ("terminator", "Terminator"),
+    ("ribosome binding", "RBS"),
+    (" rbs ", "RBS"),
+    (" rbs.", "RBS"),
+    (" rbs,", "RBS"),
+    (" rbs:", "RBS"),
+    (" rbs)", "RBS"),
+    ("coding sequence", "CDS"),
+    ("coding region", "CDS"),
+    ("open reading frame", "CDS"),
+    (" cds ", "CDS"),
+    (" cds.", "CDS"),
+    (" cds,", "CDS"),
+    (" cds:", "CDS"),
+    (" cds)", "CDS"),
+)
+
+
+def _classify_window(window: str) -> Optional[str]:
+    """Return the part type whose keyword appears at the smallest offset in ``window``.
+
+    Picking the nearest keyword (rather than a fixed priority order) keeps each part name
+    bound to *its* type word — so in ``"B0034 RBS, sfGFP coding sequence, B0015 terminator"``
+    each name resolves to the right type even though all three keywords are in range.
+    """
+
+    padded = f" {window} "
+    best: Optional[Tuple[int, str]] = None
+    for needle, label in _TYPE_KEYWORDS:
+        idx = padded.find(needle)
+        if idx < 0:
+            continue
+        if best is None or idx < best[0]:
+            best = (idx, label)
+    return best[1] if best else None
+
+
+def _scan_window_for_type(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    span_after: int = 40,
+    span_before: int = 20,
+) -> Optional[str]:
+    """Look around a regex match for a part-type keyword.
+
+    iGEM convention is ``<part_name> <type_word>`` (``B0034 RBS``, ``B0015 terminator``,
+    ``J23100 promoter``). Prefer the chars *immediately after* the match, then fall back
+    to a small window *before* it. A narrow window prevents one type word at the start
+    of a long sentence from contaminating every part name in the rest of the sentence.
+    """
+
+    after = text[end : end + span_after].lower()
+    hit_after = _classify_window(after)
+    if hit_after is not None:
+        return hit_after
+    before = text[max(0, start - span_before) : start].lower()
+    return _classify_window(before)
+
+
+def _b_part_type_prior(name: str) -> Optional[str]:
+    """Canonical iGEM B-series ranges: B0010-B0019 are Terminators, B0030-B0039 are RBSs."""
+
+    try:
+        n = int(name[1:])
+    except ValueError:
+        return None
+    if 10 <= n <= 19:
+        return "Terminator"
+    if 30 <= n <= 39:
+        return "RBS"
+    return None
+
+
+def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
+    """Scan reasoning for explicit iGEM identifiers + canonical generic names.
+
+    Returns ``[(type_hint, query_text), ...]`` in document order, deduped. The
+    ``query_text`` is enriched with the type word so the embedding model gets a
+    stronger signal (e.g. ``"B0034 RBS"`` rather than bare ``"B0034"``).
+    """
+
+    text = thought or ""
+    if not text.strip():
+        return []
+
+    found: List[Tuple[Optional[str], str]] = []
+    seen: set = set()
+
+    def push(type_hint: Optional[str], name: str) -> None:
+        key = (type_hint or "", name.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        q = f"{name} {type_hint}".strip() if type_hint else name
+        found.append((type_hint, q))
+
+    for m in _BBA_RE.finditer(text):
+        push(_scan_window_for_type(text, m.start(), m.end()), m.group(0))
+
+    for m in _J_PROMOTER_RE.finditer(text):
+        push("Promoter", m.group(0))
+
+    for m in _B_PART_RE.finditer(text):
+        name = m.group(0)
+        type_hint = _scan_window_for_type(text, m.start(), m.end()) or _b_part_type_prior(name)
+        push(type_hint, name)
+
+    for canonical, default_type in _GENERIC_PARTS:
+        for m in re.finditer(rf"\b{re.escape(canonical)}\b", text, flags=re.IGNORECASE):
+            type_hint = _scan_window_for_type(text, m.start(), m.end()) or default_type
+            push(type_hint, canonical)
+
+    return found
+
+
+def extract_part_queries(thought: str) -> List[Tuple[Optional[str], str]]:
+    """Build (type_hint, query_text) pairs for RAG retrieval.
+
+    Prefers explicit part identifiers (``BBa_*``, ``J#####``, ``B####``, ``sfGFP``,
+    ``lacO``, …) so the registry sees crisp queries. Falls back to per-line extraction
+    when no canonical names are present, with prompt-skeleton echoes filtered out.
+    """
+
+    named = extract_part_names(thought)
+    if named:
+        return named
+
+    out: List[Tuple[Optional[str], str]] = []
+    for line in extract_part_descriptions(thought):
+        if _SKELETON_GARBAGE.search(line):
+            continue
+        m = re.match(
+            r"(?i)^\s*(Promoter|RBS|CDS|Terminator)\s*[:.\-–]\s*(.+)$",
+            line.strip(),
+        )
+        if m:
+            type_hint = _TYPE_PREFIX_CANON.get(m.group(1).lower(), m.group(1))
+            query_text = m.group(2).strip()
+        else:
+            type_hint = None
+            query_text = line.strip()
+        out.append((type_hint, query_text))
+    return out
 
 
 def _split_sequence_chunks(seq: str, n: int) -> List[str]:
@@ -410,12 +616,15 @@ def apply_rag_substitution(
         return seq, {"enabled": False, "error": str(exc)}
 
     seq_clean = "".join((model_sequence or "").upper().split())
-    queries = extract_part_descriptions(thought)
+    queries = extract_part_queries(thought)
     rag_always_log(
-        f"{ctx}: extracted {len(queries)} part line(s) from thought for retrieval"
+        f"{ctx}: extracted {len(queries)} part query(ies) from thought "
+        f"(strategy={'named-parts' if extract_part_names(thought) else 'free-text-lines'})"
     )
-    for qi, line in enumerate(queries):
-        rag_debug_log(f"{ctx}: part_query[{qi}]={line!r}")
+    for qi, (type_hint, query_text) in enumerate(queries):
+        rag_always_log(
+            f"{ctx}: part_query[{qi}] type_hint={type_hint!r} query={query_text!r}"
+        )
 
     if not queries:
         rag_always_log(
@@ -436,71 +645,72 @@ def apply_rag_substitution(
     parts_out: List[Dict[str, Any]] = []
     retrieve_k = max(1, min(10, 5 if rag_debug_enabled() else 1))
 
-    for i, q in enumerate(queries):
-        type_hint = None
-        m = re.match(
-            r"(?i)^\s*(Promoter|RBS|CDS|Terminator)\s*[:.\-–]\s*(.+)$",
-            q.strip(),
-        )
-        query_text = q.strip()
-        if m:
-            raw_t = m.group(1).strip()
-            type_hint = _TYPE_PREFIX_CANON.get(raw_t.lower(), raw_t)
-            query_text = m.group(2).strip()
-
+    for i, (type_hint, query_text) in enumerate(queries):
         hits = retrieve_parts(query_text, part_type_filter=type_hint, top_k=retrieve_k)
         best = hits[0] if hits else None
         sim = best.similarity if best else 0.0
 
-        if best and sim >= thr:
-            merged.append("".join(best.sequence.upper().split()))
-            rag_debug_log(
-                f"{ctx}: slot[{i}] SUBSTITUTED iGEM sequence bp={len(merged[-1])} "
-                f"sim={sim:.4f} (≥ {thr:.4f}) part={best.part_name!r} id={best.part_id!r}"
+        if best is None:
+            rag_always_log(
+                f"RAG result: <none> — registry returned no hits for {query_text!r}"
             )
-            parts_out.append(
-                {
-                    "query": q,
-                    "retrieval_query": query_text,
-                    "part_type_filter": type_hint,
-                    "verified": True,
-                    "similarity": round(sim, 4),
-                    "part_id": best.part_id,
-                    "part_name": best.part_name,
-                    "part_type": best.part_type,
-                    "short_desc": best.short_desc,
-                    "sequence": merged[-1],
-                }
-            )
-        else:
             fallback = chunks[i] if i < len(chunks) else ""
             merged.append(fallback)
-            sim_s = f"{sim:.4f}" if best else "n/a"
-            rag_debug_log(
+            rag_always_log(
                 f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(fallback)} "
-                f"best_sim={sim_s} (need ≥ {thr:.4f})"
+                f"(no registry hits at all — sequence may be hallucinated)"
             )
             parts_out.append(
                 {
-                    "query": q,
+                    "query": query_text,
                     "retrieval_query": query_text,
                     "part_type_filter": type_hint,
                     "verified": False,
                     "unverified": True,
-                    "similarity": round(sim, 4) if best else None,
-                    "best_candidate": (
-                        {
-                            "part_id": best.part_id,
-                            "part_name": best.part_name,
-                            "part_type": best.part_type,
-                            "short_desc": best.short_desc,
-                        }
-                        if best
-                        else None
-                    ),
+                    "substituted": False,
+                    "similarity": None,
+                    "best_candidate": None,
                     "sequence": fallback,
                 }
             )
+            continue
+
+        verified = sim >= thr
+        verdict = "VERIFIED" if verified else "unverified-but-substituted"
+        rag_always_log(
+            f"RAG result: {best.part_id} ({best.part_name}, type={best.part_type}) "
+            f"similarity={sim:.4f} verdict={verdict}"
+        )
+
+        registry_seq = "".join(best.sequence.upper().split())
+        merged.append(registry_seq)
+        if verified:
+            rag_always_log(
+                f"{ctx}: slot[{i}] SUBSTITUTED bp={len(registry_seq)} "
+                f"sim={sim:.4f} (≥ {thr:.4f}) part={best.part_name!r} id={best.part_id!r} VERIFIED"
+            )
+        else:
+            rag_always_log(
+                f"{ctx}: slot[{i}] SUBSTITUTED bp={len(registry_seq)} "
+                f"sim={sim:.4f} (< {thr:.4f}) part={best.part_name!r} id={best.part_id!r} "
+                "unverified — registry DNA preferred over hallucinated model slice"
+            )
+        parts_out.append(
+            {
+                "query": query_text,
+                "retrieval_query": query_text,
+                "part_type_filter": type_hint,
+                "verified": verified,
+                "unverified": not verified,
+                "substituted": True,
+                "similarity": round(sim, 4),
+                "part_id": best.part_id,
+                "part_name": best.part_name,
+                "part_type": best.part_type,
+                "short_desc": best.short_desc,
+                "sequence": registry_seq,
+            }
+        )
 
     final = "".join(merged)
     verified_count = sum(1 for p in parts_out if p.get("verified"))

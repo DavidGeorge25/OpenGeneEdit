@@ -269,6 +269,7 @@ kbd {
 
   /* Two-row layout: cap the compiler-output strip so it scrolls internally */
   body.in-workspace .split {
+    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, min(38vh, 360px));
   }
 }
@@ -311,7 +312,12 @@ body.in-workspace .split {
   flex: 1;
   min-height: 0;
   max-height: 100%;
+  max-width: none;
+  width: 100%;
+  margin: 0;
   border-top: none;
+  /* Side rails grow gently with viewport; center absorbs remaining width */
+  grid-template-columns: minmax(300px, 18vw) minmax(0, 1fr) minmax(300px, 22vw);
   /* Without minmax(0, 1fr), the row sizes to the tallest column and the page grows past the viewport */
   grid-template-rows: minmax(0, 1fr);
 }
@@ -803,19 +809,27 @@ body.in-workspace .extras-pane {
   max-height: none;
 }
 
-/* ─── Compiler log (center column · matches card UI) ───────────────────── */
+/* ─── Live trace (under Compiler output · fixed strip; scroll is in .extras-scroll) ─ */
 
-.artifact-pane > .workspace-terminal {
+.extras-pane > .workspace-terminal {
   flex-shrink: 0;
   width: 100%;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 0 1.35rem 0.45rem;
+  margin: 0;
+  padding: 0 1.05rem 0.65rem;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* Secondary to construct map — short dock; scroll handles overflow */
-  max-height: min(17vh, 158px);
+  max-height: min(26vh, 232px);
+  box-shadow: none;
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.extras-pane > .workspace-terminal .workspace-terminal-head {
+  border-radius: 0;
 }
 
 .workspace-terminal {
@@ -972,7 +986,7 @@ body.in-workspace .extras-pane {
 }
 
 body.in-workspace .plasmid-svg {
-  max-height: min(58vh, 640px);
+  max-height: min(68vh, 760px);
 }
 
 .extras-toolbar {
@@ -983,9 +997,6 @@ body.in-workspace .plasmid-svg {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  z-index: 1;
 }
 
 .extras-title {
@@ -1078,6 +1089,10 @@ body.in-workspace .plasmid-svg {
   max-width: 760px;
   margin-left: auto;
   margin-right: auto;
+}
+
+body.in-workspace .artifact-body > * {
+  max-width: min(980px, 100%);
 }
 
 .artifact-section {

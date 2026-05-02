@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260501-viewport-lock" />
+    <link rel="stylesheet" href="/css/app.css?v=20260501-layout-fullwidth" />
   </head>
   <body>
     <nav class="topnav">
@@ -190,11 +190,17 @@
             </div>
 
           </div>
+        </div>
 
+        <aside class="extras-pane" aria-label="Compiler analysis">
+          <header class="extras-toolbar">
+            <span class="extras-title">Compiler output</span>
+            <span class="extras-toolbar-meta" id="extrasMeta"></span>
+          </header>
           <div class="workspace-terminal" id="workspaceTerminal" aria-label="Compiler log">
             <header class="workspace-terminal-head">
               <div class="workspace-terminal-head-left">
-                <span class="workspace-terminal-title">Compiler log</span>
+                <span class="workspace-terminal-title">Live trace</span>
                 <span class="workspace-terminal-chip" id="compileChip">Gemma-4</span>
               </div>
               <span class="workspace-terminal-meta">
@@ -237,13 +243,6 @@
               </p>
             </div>
           </div>
-        </div>
-
-        <aside class="extras-pane" aria-label="Compiler analysis">
-          <header class="extras-toolbar">
-            <span class="extras-title">Compiler output</span>
-            <span class="extras-toolbar-meta" id="extrasMeta"></span>
-          </header>
           <div class="extras-scroll" id="extrasScroll">
             <section class="pareto-card" id="paretoSection" hidden aria-label="Pareto front">
               <header class="pareto-card-head">
