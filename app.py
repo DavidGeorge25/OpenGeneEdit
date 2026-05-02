@@ -3,7 +3,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from inference import parse_thought_and_sequence, run_mock_inference
+from inference import parse_thought_and_sequence, run_inference
 from visualizer import generate_interactive_plasmid_plot
 
 
@@ -101,7 +101,7 @@ if submit:
         st.warning("Please enter a prompt before submitting.")
     else:
         status = st.status("Running compiler backend...", expanded=False)
-        raw_output = run_mock_inference(prompt)
+        raw_output = run_inference(prompt)
         thought_text, dna_sequence = parse_thought_and_sequence(raw_output)
         plasmid_figure = generate_interactive_plasmid_plot(dna_sequence)
         status.update(label="Compile complete", state="complete")

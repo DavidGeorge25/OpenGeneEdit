@@ -4,8 +4,7 @@ Each pass is a pure function ``(sequence: str) -> PassResult``. Passes are
 classified as ``parse``, ``lint``, or ``score``; the ranker consumes the
 ``metric`` field on score passes to derive composite candidate scores.
 
-Designed to be model-agnostic: works on any DNA string, regardless of whether
-it came from the mock backend or the fine-tuned Gemma GGUF.
+Model-agnostic: operates on Gemma-produced DNA sequences from the inference layer.
 """
 from __future__ import annotations
 
@@ -450,7 +449,7 @@ def pass_rbs(seq: str) -> PassResult:
             best_pos = win_lo + i
 
     metric = best_score / len(rc_anti)  # 0..1
-    expr_au = int(round(50 + (metric ** 2) * 7950))  # mock 50..8000 a.u.
+    expr_au = int(round(50 + (metric ** 2) * 7950))  # heuristic scale (~50–8000 a.u.)
 
     if metric >= 0.83:
         status = "ok"
@@ -530,16 +529,20 @@ def pass_hairpin(seq: str, min_stem: int = 6, max_loop: int = 8) -> PassResult:
 
 
 def pass_biosec(seq: str) -> PassResult:
-    """Stub biosecurity screen. The real impl would call IGSC or run a curated
-    motif/k-mer scan against select-agent / hazardous sequences. Here we just
-    confirm we ran the pass — placeholder for a serious implementation.
-    """
+    """Off by default pending IGSC linkage or curated select-agent motifs."""
+
     t0 = _now_ms()
+    _ = len(seq)
     return PassResult(
         pass_id="biosec", name="Biosecurity screen", category="lint",
-        status="ok",
-        summary="No matches against IGSC hazardous-sequence list (stub)",
-        diagnostics=[Diagnostic("info", "Stub screen — replace with curated motif set or IGSC API")],
+        status="warn",
+        summary="External biosecurity database not wired in this build",
+        diagnostics=[
+            Diagnostic(
+                "info",
+                "Omitted by design pending IGSC linkage or curated select-agent motifs.",
+            ),
+        ],
         duration_ms=_now_ms() - t0,
     )
 

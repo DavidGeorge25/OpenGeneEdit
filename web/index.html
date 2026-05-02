@@ -11,14 +11,14 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260430-2358" />
+    <link rel="stylesheet" href="/css/app.css?v=20260501-logcompact" />
   </head>
   <body>
     <nav class="topnav">
       <a href="/" class="topnav-brand" id="topnavHome" aria-label="DGene — home">
         <img src="/logo.png" alt="" class="topnav-logo-img" width="160" height="48" decoding="async" />
       </a>
-      <span class="pill pill--nav" id="modelPillNav">Model · mock</span>
+      <span class="pill pill--nav" id="modelPillNav">Model · Gemma-4</span>
     </nav>
 
     <!-- Stage 1: prompt-first landing (Origami-style) -->
@@ -49,7 +49,21 @@
           <button type="button" class="composer-send" id="compileBtn" aria-label="Compile design">↑</button>
         </div>
       </div>
-      <p class="landing-foot">Mock inference for demo · wire your Gemma model to the same API</p>
+      <p class="landing-foot" id="footHostedLine">
+        Reasoning + sequence from hosted <strong>Gemma-4</strong>
+        (Google AI · <code id="footApiModelId">gemma-4-31b-it</code>).
+        Compiler runs static validation passes.
+      </p>
+      <p class="landing-foot landing-foot-ft" id="footFtLine" hidden>
+        Running <strong>Gemma-4 FT</strong>: local quantized weights
+        (<code id="footGgufName">weights.gguf</code>) via <code>llama-cpp-python</code>.
+      </p>
+      <p class="landing-foot landing-foot-note" id="footGgufPlug">
+        <strong>Fine-tuned checkpoint:</strong> download the release <code>.gguf</code> from Hugging Face (mirrors okay),
+        install <code>llama-cpp-python</code>,
+        set <code>DGENE_GGUF_PATH=/absolute/path/to/model.gguf</code> and <code>DGENE_INFERENCE=gguf</code>.
+        If <code>GEMINI_API_KEY</code> is also set, omit it or pin <code>DGENE_INFERENCE=gguf</code>—you host quantized Gemma‑4 inference locally on CPU/GPU.
+      </p>
     </section>
 
     <!-- Stage 2: Claude-style split (reasoning left · artifact right) -->
@@ -58,7 +72,7 @@
         <aside class="chat-pane" aria-label="Reasoning and messages">
           <div class="chat-toolbar">
             <button type="button" class="btn-text" id="newDesignBtn">← New design</button>
-            <span class="pill pill--small" id="modelPill">Model: mock</span>
+            <span class="pill pill--small" id="modelPill">Model: Gemma-4</span>
           </div>
           <div class="chat-scroll" id="chatScroll">
             <article class="bubble bubble-user" id="userBubble" hidden>
@@ -67,7 +81,9 @@
             </article>
             <article class="bubble bubble-assistant">
               <span class="bubble-label">DGene</span>
-              <p class="bubble-body thought" id="thoughtText"></p>
+              <div class="bubble-body thought thought-wrap">
+                <p class="thought-main" id="thoughtText"></p>
+              </div>
               <span class="bubble-status" id="streamBadge">…</span>
             </article>
 
@@ -168,6 +184,53 @@
             </div>
 
           </div>
+
+          <div class="workspace-terminal" id="workspaceTerminal" aria-label="Compiler log">
+            <header class="workspace-terminal-head">
+              <div class="workspace-terminal-head-left">
+                <span class="workspace-terminal-title">Compiler log</span>
+                <span class="workspace-terminal-chip" id="compileChip">Gemma-4</span>
+              </div>
+              <span class="workspace-terminal-meta">
+                <span class="workspace-terminal-elapsed" id="compileElapsed">0:00</span>
+              </span>
+            </header>
+            <div class="workspace-terminal-body">
+              <div
+                id="compilePipeline"
+                class="compile-pipeline compile-pipeline--dock"
+                hidden
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <div class="compile-pipeline-top">
+                  <div class="compile-pipeline-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div class="compile-pipeline-fill" id="compilePipelineFill"></div>
+                    <div class="compile-pipeline-bar-shimmer" aria-hidden="true"></div>
+                  </div>
+                  <p class="compile-pipeline-ticker" id="compileTicker">Idle · compile to stream logs</p>
+                </div>
+                <div class="compile-terminal-scroll">
+                  <pre class="compile-debug-log" id="compileDebugLog" hidden></pre>
+                  <details class="compile-live-stream" id="compileLiveStream" hidden>
+                    <summary>
+                      Live model output
+                      <span class="compile-live-hint">streaming</span>
+                    </summary>
+                    <pre class="compile-live-pre" id="compileLivePre"></pre>
+                  </details>
+                </div>
+                <p class="compile-step-counter" id="compileStepCounter">Step 1 / 6</p>
+                <div class="compile-step-slot" id="compileStepSlot" aria-live="polite"></div>
+                <p class="compile-pipeline-foot">
+                  <span class="compile-pipeline-note">Trace & SSE · parallel candidates</span>
+                </p>
+              </div>
+              <p class="workspace-terminal-idle" id="terminalIdleHint">
+                Compile a design to show live backend trace and streamed output here.
+              </p>
+            </div>
+          </div>
         </div>
 
         <aside class="extras-pane" aria-label="Compiler analysis">
@@ -217,6 +280,6 @@
       </div>
     </section>
 
-    <script src="/js/app.js?v=20260430-2350" type="module"></script>
+    <script src="/js/app.js?v=20260501-terminalpanel" type="module"></script>
   </body>
 </html>

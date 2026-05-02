@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+"""Build Gemma 4 supervised JSONL training data using hosted Gemma 4 (same API path as inference)."""
+
 import argparse
 import json
-import os
 import random
 import re
 import sys
@@ -9,11 +10,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List
 
-from openai import BadRequestError
-from openai import APIStatusError
-from openai import AzureOpenAI
-from openai import RateLimitError
-
+from inference import generate_text_gemma4
 
 TARGET_TYPES = ("Promoter", "RBS", "CDS", "Terminator")
 SYSTEM_PROMPT = (
@@ -26,7 +23,10 @@ SYSTEM_PROMPT = (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build Gemma 4 thinking dataset from iGEM JSONL via Azure OpenAI."
+        description=(
+            "Build Gemma dataset from iGEM JSONL via hosted Gemma 4 "
+            "(GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL)."
+        )
     )
     parser.add_argument("--input", default="igem_dataset.jsonl", help="Input JSONL path.")
     parser.add_argument("--output", default="gemma_train.jsonl", help="Output JSONL path.")
@@ -41,16 +41,6 @@ def parse_args():
         type=int,
         default=42,
         help="Random seed for reproducible sampling.",
-    )
-    parser.add_argument(
-        "--deployment",
-        default="gpt-4o-mini",
-        help="Azure OpenAI deployment name.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Skip API calls and emit deterministic placeholder thoughts for format testing.",
     )
     return parser.parse_args()
 
@@ -140,31 +130,6 @@ def sample_diverse(records: List[Dict[str, str]], sample_size: int, seed: int):
     return chosen
 
 
-def init_client():
-    api_key = os.getenv("AZURE_OPENAI_API_KEY")
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-
-    missing = [
-        name
-        for name, value in [
-            ("AZURE_OPENAI_API_KEY", api_key),
-            ("AZURE_OPENAI_ENDPOINT", endpoint),
-        ]
-        if not value
-    ]
-    if missing:
-        raise EnvironmentError(
-            f"Missing required environment variables: {', '.join(missing)}"
-        )
-
-    return AzureOpenAI(
-        api_key=api_key,
-        azure_endpoint=endpoint,
-        api_version=api_version,
-    )
-
-
 def build_user_prompt(record: Dict[str, str]) -> str:
     return (
         f"Part: {record['part_name']}. "
@@ -173,50 +138,23 @@ def build_user_prompt(record: Dict[str, str]) -> str:
     )
 
 
-def fallback_thought(record: Dict[str, str]) -> str:
-    part_type = record["part_type"]
-    desc = record["short_desc"] or "the requested circuit behavior"
-    if part_type == "Promoter":
-        return (
-            f"This promoter should convert the stated signal in '{desc}' into transcriptional output with context-appropriate strength. "
-            "It must be placed upstream of a CDS and paired with host-compatible regulation to minimize leak and unintended activation."
-        )
-    if part_type == "RBS":
-        return (
-            f"This RBS should tune translation initiation for '{desc}' so protein expression is balanced with upstream transcription. "
-            "It must be directly upstream of the CDS with proper spacing and sequence context to avoid weak initiation or burden."
-        )
-    if part_type == "CDS":
-        return (
-            f"This CDS should encode the functional effector described in '{desc}' and preserve a coherent reading frame for reliable protein output. "
-            "It must remain in-frame with start/stop context and be matched to host expression constraints such as codon usage and toxicity."
-        )
-    return (
-        f"This terminator should stop transcription linked to '{desc}' to prevent read-through into downstream modules. "
-        "It must be placed downstream of the transcribed unit and be strong enough for the host context to improve circuit insulation."
-    )
-
-
-def get_reasoning_with_backoff(
-    client: AzureOpenAI, deployment: str, record: Dict[str, str], max_retries: int = 8
-) -> str:
+def get_reasoning_gemma(record: Dict[str, str], max_retries: int = 8) -> str:
     delay = 1.0
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=deployment,
+            text = generate_text_gemma4(
+                build_user_prompt(record),
+                system_message=SYSTEM_PROMPT,
                 temperature=0.2,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": build_user_prompt(record)},
-                ],
-            )
-            text = (response.choices[0].message.content or "").strip()
+            ).strip()
             if not text:
                 raise RuntimeError("Model returned empty reasoning text.")
             return text
-        except RateLimitError:
+        except Exception as exc:
             if attempt == max_retries - 1:
+                raise
+            msg = str(exc).lower()
+            if not ("429" in msg or "resource exhausted" in msg or "rate" in msg):
                 raise
             sleep_for = delay + random.uniform(0.0, 0.5)
             print(
@@ -225,28 +163,7 @@ def get_reasoning_with_backoff(
                 flush=True,
             )
             time.sleep(sleep_for)
-            delay *= 2
-        except APIStatusError as exc:
-            if exc.status_code != 429 or attempt == max_retries - 1:
-                raise
-            sleep_for = delay + random.uniform(0.0, 0.5)
-            print(
-                f"[retry] HTTP 429 for {record['part_name']}, "
-                f"attempt={attempt + 1}, sleeping={sleep_for:.2f}s",
-                flush=True,
-            )
-            time.sleep(sleep_for)
-            delay *= 2
-        except BadRequestError as exc:
-            msg = str(exc).lower()
-            if "content_filter" in msg or "responsibleaipolicyviolation" in msg:
-                print(
-                    f"[warn] content-filtered prompt for {record['part_name']}; "
-                    "using fallback thought.",
-                    flush=True,
-                )
-                return fallback_thought(record)
-            raise
+            delay = min(delay * 2.0, 120.0)
 
 
 def format_gemma_example(record: Dict[str, str], thought: str) -> Dict[str, object]:
@@ -276,18 +193,9 @@ def main():
         flush=True,
     )
 
-    client = None if args.dry_run else init_client()
-
     with open(args.output, "w", encoding="utf-8") as out:
         for idx, record in enumerate(selected, start=1):
-            if args.dry_run:
-                thought = (
-                    f"This {record['part_type'].lower()} should be placed according to its regulatory role "
-                    f"in the circuit and matched to host context for predictable expression. "
-                    f"It must satisfy placement and compatibility constraints implied by the part description."
-                )
-            else:
-                thought = get_reasoning_with_backoff(client, args.deployment, record)
+            thought = get_reasoning_gemma(record)
 
             example = format_gemma_example(record, thought)
             out.write(json.dumps(example, ensure_ascii=True) + "\n")

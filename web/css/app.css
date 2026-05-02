@@ -225,6 +225,20 @@ kbd {
   margin: 0;
 }
 
+.landing-foot-ft,
+.landing-foot-note {
+  margin-top: 0.46rem;
+  max-width: 56rem;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.45;
+}
+
+.landing-foot-note code,
+.landing-foot-ft code {
+  font-size: 0.825rem;
+}
+
 .workspace {
   min-height: calc(100vh - 52px);
 }
@@ -238,6 +252,7 @@ kbd {
   border-top: 1px solid var(--line);
   border-left: 1px solid var(--line);
   border-right: 1px solid var(--line);
+  align-items: stretch;
 }
 
 @media (max-width: 1280px) {
@@ -258,8 +273,10 @@ kbd {
     border-left: none;
     border-right: none;
   }
+  .chat-pane,
+  .artifact-pane,
   .extras-pane {
-    grid-column: auto;
+    grid-column: 1 / -1;
   }
 }
 
@@ -279,10 +296,13 @@ body.in-workspace .split {
 }
 
 .chat-pane {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   background: var(--bg-subtle);
   border-right: 1px solid var(--line);
+  min-height: 0;
 }
 
 @media (max-width: 900px) {
@@ -363,10 +383,334 @@ body.in-workspace .split {
   color: var(--text);
 }
 
-.bubble-body.thought {
+.thought-wrap {
   min-height: 4rem;
   border-left: 2px solid var(--accent-soft);
   padding-left: 0.85rem;
+}
+
+.thought-main {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+/* ─── Compile pipeline loading (in-chat) ─────────────────────────────────── */
+
+.compile-pipeline {
+  margin: 0;
+  padding: 0 0 0.35rem 0;
+}
+
+.compile-pipeline-top {
+  margin-bottom: 0.85rem;
+}
+
+.compile-pipeline-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.compile-pipeline-title {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.compile-pipeline-chip {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(135deg, rgba(219, 39, 119, 0.08), rgba(59, 130, 246, 0.06));
+  color: var(--accent-soft);
+  animation: compile-chip-glow 2.4s ease-in-out infinite;
+}
+
+@keyframes compile-chip-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(219, 39, 119, 0);
+  }
+  50% {
+    box-shadow: 0 0 12px 1px rgba(219, 39, 119, 0.22);
+  }
+}
+
+.compile-pipeline-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.compile-pipeline-fill {
+  height: 100%;
+  width: 4%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    #be185d 0%,
+    #6366f1 45%,
+    #06b6d4 100%
+  );
+  background-size: 200% 100%;
+  animation: compile-fill-flow 3.2s linear infinite;
+  transition: width 0.85s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes compile-fill-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+.compile-pipeline-bar-shimmer {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 45%,
+    transparent 70%
+  );
+  animation: compile-shimmer 2.1s ease-in-out infinite;
+  mix-blend-mode: overlay;
+}
+
+@keyframes compile-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.compile-pipeline-ticker {
+  margin: 0.55rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  line-height: 1.45;
+  min-height: 2.6em;
+}
+
+.compile-debug-log {
+  margin: 0.5rem 0 0;
+  padding: 0.45rem 0.5rem;
+  max-height: 7.5rem;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  line-height: 1.45;
+  color: var(--muted);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.compile-live-stream {
+  margin: 0.55rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.compile-live-stream summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  list-style-position: outside;
+}
+
+.compile-live-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--muted-light);
+}
+
+.compile-live-pre {
+  margin: 0.45rem 0 0;
+  padding: 0.45rem 0.5rem;
+  max-height: 14rem;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.compile-step-counter {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-light);
+  margin: 0.4rem 0 0.35rem;
+}
+
+.compile-step-slot {
+  min-height: 5.25rem;
+  margin: 0;
+}
+
+.compile-step--solo {
+  animation: compile-card-swap 0.38s ease-out;
+}
+
+@keyframes compile-card-swap {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.compile-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition:
+    border-color 0.35s ease,
+    background 0.35s ease,
+    transform 0.35s ease;
+}
+
+.compile-step.is-done {
+  border-color: rgba(15, 118, 110, 0.35);
+  background: rgba(15, 118, 110, 0.05);
+}
+
+.compile-step.is-active {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.07), rgba(219, 39, 119, 0.05));
+  transform: translateX(2px);
+}
+
+.compile-step-glyph {
+  flex-shrink: 0;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.15rem;
+  border-radius: 999px;
+  border: 2px solid var(--line-strong);
+  font-size: 0.55rem;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  color: var(--muted-light);
+  transition:
+    border-color 0.3s ease,
+    background 0.3s ease,
+    color 0.3s ease,
+    box-shadow 0.3s ease;
+}
+
+.compile-step.is-active .compile-step-glyph {
+  border-color: #6366f1;
+  color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  animation: compile-glyph-pulse 1.25s ease-in-out infinite;
+}
+
+.compile-step.is-done .compile-step-glyph {
+  border-color: #0f766e;
+  background: #0f766e;
+  color: #fff;
+  font-weight: 700;
+  animation: none;
+  box-shadow: none;
+}
+
+@keyframes compile-glyph-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.92;
+  }
+}
+
+.compile-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.compile-step-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.compile-step-sub {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.compile-pipeline-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+  margin: 0.75rem 0 0;
+  padding-top: 0.65rem;
+  border-top: 1px dashed var(--line);
+}
+
+.compile-elapsed {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.compile-pipeline-note {
+  font-size: 0.625rem;
+  color: var(--muted-light);
 }
 
 .bubble-status {
@@ -382,31 +726,210 @@ body.in-workspace .split {
 }
 
 .artifact-pane {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   background: var(--surface);
-  min-height: calc(100vh - 52px);
+  min-height: 0;
   min-width: 0; /* allow grid child to shrink instead of overflowing */
+  overflow: hidden;
 }
 
 body.in-workspace .artifact-pane {
-  min-height: 100vh;
+  min-height: 0;
+  max-height: 100vh;
 }
 
 /* ─── Extras pane (compiler analysis on the right) ─────────────────────── */
 
 .extras-pane {
+  grid-column: 3;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   background: var(--bg-subtle);
   border-left: 1px solid var(--line);
-  min-height: calc(100vh - 52px);
+  min-height: 0;
   min-width: 0;
-  max-height: 100vh;
+  max-height: none;
 }
 
 body.in-workspace .extras-pane {
-  min-height: 100vh;
+  min-height: 0;
+  max-height: none;
+}
+
+/* ─── Compiler log (center column · matches card UI) ───────────────────── */
+
+.artifact-pane > .workspace-terminal {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 1.5rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Compact card height — primary content is the scroll area below */
+  max-height: min(26vh, 236px);
+}
+
+.workspace-terminal {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.workspace-terminal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 0.5rem;
+  padding: 0.32rem 0.5rem;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.workspace-terminal-head-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.workspace-terminal-title {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.workspace-terminal-chip {
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--accent-soft);
+  background: var(--surface);
+}
+
+.workspace-terminal-meta {
+  font-size: 0.62rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-terminal-elapsed {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workspace-terminal-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0.4rem 0.4rem;
+}
+
+.workspace-terminal-idle {
+  margin: 0;
+  padding: 0.4rem 0.2rem 0;
+  font-size: 0.68rem;
+  color: var(--muted-light);
+  line-height: 1.4;
+}
+
+.compile-pipeline--dock {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0.28rem 0.2rem 0.15rem;
+}
+
+.compile-pipeline--dock .compile-pipeline-top {
+  flex-shrink: 0;
+  margin-bottom: 0.22rem;
+}
+
+.compile-pipeline--dock .compile-pipeline-bar {
+  height: 4px;
+  background: var(--bg-subtle);
+  border-color: var(--line);
+}
+
+.compile-pipeline--dock .compile-pipeline-ticker {
+  color: var(--muted);
+  margin: 0.2rem 0 0;
+  font-size: 0.6rem;
+  line-height: 1.35;
+  min-height: 0;
+}
+
+/* Live compile doesn’t use phased steps — hide to save vertical space */
+.compile-pipeline--dock .compile-step-counter,
+.compile-pipeline--dock .compile-step-slot,
+.compile-pipeline--dock .compile-pipeline-foot {
+  display: none;
+}
+
+.compile-terminal-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin-top: 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+.compile-pipeline--dock .compile-debug-log {
+  max-height: none;
+  margin: 0 0 0.35rem;
+  padding: 0.35rem 0.4rem;
+  font-size: 0.6rem;
+  line-height: 1.38;
+  color: var(--text);
+  background: var(--bg-subtle);
+  border-color: var(--line);
+}
+
+.compile-pipeline--dock .compile-live-stream {
+  margin-top: 0;
+  padding: 0.35rem 0.4rem;
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+.compile-pipeline--dock .compile-live-stream summary {
+  color: var(--muted);
+  font-size: 0.6rem;
+}
+
+.compile-pipeline--dock .compile-live-pre {
+  color: var(--text);
+  background: var(--bg-subtle);
+  border-color: var(--line);
+  max-height: none;
+  margin-bottom: 0;
+  font-size: 0.6rem;
+  line-height: 1.38;
+  padding: 0.35rem 0.4rem;
+}
+
+body.in-workspace .plasmid-svg {
+  max-height: min(46vh, 520px);
 }
 
 .extras-toolbar {
@@ -498,8 +1021,9 @@ body.in-workspace .extras-pane {
 
 .artifact-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 1.25rem 1.5rem 2rem;
+  padding: 1.25rem 1.5rem 1rem;
   display: flex;
   flex-direction: column;
   align-items: stretch;

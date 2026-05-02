@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DGene compiler server — UI + /api/compile orchestration (stdlib only).
+"""DGene compiler server — UI + /api/compile orchestration.
 
 Pipeline per /api/compile request:
 
@@ -8,9 +8,22 @@ Pipeline per /api/compile request:
   3. ranker            → composite score + Pareto front
   4. response          → candidates[] sorted by composite, with `is_pareto`
 
-The backend is selected once at server startup so the (potentially heavy)
-GGUF model isn't re-loaded per request. ``DGENE_GGUF_PATH=/path/to/model.gguf``
-flips inference from MockBackend → GGUFBackend without code changes.
+The backend is resolved once inside ``inference.get_backend()`` (lazy singleton):
+
+  • Set ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` (+ optional ``DGENE_GEMINI_MODEL`` such as
+    ``gemma-4-31b-it``) for hosted Gemma 4 via the Generative Language API.
+
+  • Or ``DGENE_GGUF_PATH=/path/to/model.gguf`` for local quantized Gemma (``llama-cpp-python``).
+
+  • See ``inference.py`` for ``DGENE_INFERENCE=auto|gemini|gguf``.
+
+This process uses ``ThreadingHTTPServer`` so a long-running ``/api/compile``
+(e.g. several Gemma API round-trips) does not block other tabs or reloads.
+
+**Live progress (UI):** ``POST /api/compile`` with ``"progress": true`` returns
+``202`` and ``{"job_id": "..."}``. Poll ``GET /api/compile/status?job_id=...``
+until ``done``; each response includes a growing ``lines`` trace from Gemma,
+passes, and ranking.
 """
 from __future__ import annotations
 
@@ -19,14 +32,39 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
-from dataclasses import asdict
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
-from inference import get_backend, parse_thought_and_sequence, run_mock_inference  # noqa: F401
+from inference import (  # noqa: F401
+    compile_progress,
+    get_backend,
+    infer_debug_log,
+    parse_thought_and_sequence,
+    run_inference,
+    set_compile_progress_hook,
+    set_compile_stream_hook,
+)
 from passes import passes_to_dicts, run_passes
 from ranker import rank, score_candidate, scores_to_dict
+
+
+def _health_dict() -> dict:
+    bk = get_backend()
+    data = {
+        "status": "ok",
+        "model": getattr(bk, "name", "unknown"),
+        "backend_kind": getattr(bk, "backend_kind", "unknown"),
+    }
+    mid = getattr(bk, "model_id", None)
+    if getattr(bk, "backend_kind", None) == "hosted" and mid:
+        data["api_model_id"] = mid
+    gf = getattr(bk, "gguf_filename", None)
+    if getattr(bk, "backend_kind", None) == "fine_tuned" and gf:
+        data["gguf_file"] = gf
+    return data
 
 
 WEB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -43,34 +81,38 @@ MIME = {
 
 
 # ---------------------------------------------------------------------------
-# Backend held as a singleton; lazy-init under a lock so first request doesn't
-# race a slow GGUF load.
-# ---------------------------------------------------------------------------
-
-_BACKEND = None
-_BACKEND_LOCK = threading.Lock()
-
-
-def _backend():
-    global _BACKEND
-    if _BACKEND is None:
-        with _BACKEND_LOCK:
-            if _BACKEND is None:
-                _BACKEND = get_backend()
-    return _BACKEND
-
-
-# ---------------------------------------------------------------------------
 # Compile pipeline
 # ---------------------------------------------------------------------------
 
 
 def _compile(prompt: str, n: int = 4) -> dict:
-    backend = _backend()
+    compile_progress("compile · resolving backend…")
+    backend = get_backend()
+    bk = getattr(backend, "name", "?")
+    mid = getattr(backend, "model_id", None) or getattr(backend, "gguf_filename", None)
+    if mid:
+        compile_progress(f"compile · backend={bk} · {mid}")
+    else:
+        compile_progress(f"compile · backend={bk}")
+    infer_debug_log(
+        f"/api/compile start backend={getattr(backend, 'name', '?')} n={n} "
+        f"prompt_chars={len(prompt)}"
+    )
+    t0 = time.perf_counter()
+    compile_progress(f"compile · inference ({n} candidates)…")
     candidates = backend.generate(prompt, n=n)
+    infer_debug_log(
+        f"/api/compile inference done in {(time.perf_counter() - t0):.1f}s "
+        f"candidates={len(candidates)}"
+    )
+    compile_progress(
+        f"compile · inference finished in {(time.perf_counter() - t0):.1f}s · "
+        f"static passes ({len(candidates)} seqs)…"
+    )
 
     out = []
-    for cand in candidates:
+    for idx, cand in enumerate(candidates):
+        compile_progress(f"compile · passes · candidate {idx + 1}/{len(candidates)}…")
         passes = run_passes(cand.sequence)
         scores = score_candidate(passes, len(cand.sequence))
         out.append({
@@ -83,8 +125,10 @@ def _compile(prompt: str, n: int = 4) -> dict:
             "scores": scores_to_dict(scores),
         })
 
+    compile_progress("compile · ranking · Pareto front…")
     ranked = rank(out)
     best_id = ranked[0]["id"] if ranked else None
+    compile_progress("compile · done")
 
     return {
         "candidates": ranked,
@@ -95,12 +139,78 @@ def _compile(prompt: str, n: int = 4) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Async compile jobs (live progress for the UI)
+# ---------------------------------------------------------------------------
+
+_JOBS_LOCK = threading.Lock()
+_COMPILE_JOBS: dict[str, dict] = {}
+_MAX_JOB_LINES = 500
+_STREAM_PREVIEW_CHARS = 65536
+
+
+def _job_append_line(job_id: str, line: str) -> None:
+    with _JOBS_LOCK:
+        job = _COMPILE_JOBS.get(job_id)
+        if not job:
+            return
+        job["lines"].append(line)
+        if len(job["lines"]) > _MAX_JOB_LINES:
+            job["lines"] = job["lines"][-(_MAX_JOB_LINES - 50) :]
+
+
+def _job_set_stream(job_id: str, stream_id: str, text: str) -> None:
+    if len(text) > _STREAM_PREVIEW_CHARS:
+        text = "…(truncated for live panel)\n" + text[-_STREAM_PREVIEW_CHARS:]
+    with _JOBS_LOCK:
+        job = _COMPILE_JOBS.get(job_id)
+        if not job:
+            return
+        job.setdefault("streams", {})[stream_id] = text
+
+
+def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
+    def push(msg: str) -> None:
+        _job_append_line(job_id, f"{time.strftime('%H:%M:%S')}  {msg}")
+
+    def push_stream(stream_id: str, text: str) -> None:
+        _job_set_stream(job_id, stream_id, text)
+
+    set_compile_progress_hook(push)
+    set_compile_stream_hook(push_stream)
+    try:
+        push("job · started")
+        result = _compile(prompt, n=n)
+        with _JOBS_LOCK:
+            job = _COMPILE_JOBS.get(job_id)
+            if job:
+                job["result"] = result
+                job["done"] = True
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        with _JOBS_LOCK:
+            job = _COMPILE_JOBS.get(job_id)
+            if job:
+                job["error"] = str(exc)
+                job["done"] = True
+    finally:
+        set_compile_progress_hook(None)
+        set_compile_stream_hook(None)
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "DGeneCompiler/2.0"
+
+    def _write_body(self, body: bytes) -> None:
+        """Write response body; ignore client disconnect (avoids secondary tracebacks)."""
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -114,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._cors()
         self.end_headers()
-        self.wfile.write(body)
+        self._write_body(body)
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -136,6 +246,25 @@ class Handler(BaseHTTPRequestHandler):
         prompt = str(payload.get("prompt", ""))
         n = int(payload.get("n", 4))
         n = max(1, min(8, n))
+        want_progress = bool(payload.get("progress"))
+        if want_progress:
+            job_id = uuid.uuid4().hex
+            with _JOBS_LOCK:
+                _COMPILE_JOBS[job_id] = {
+                    "lines": [],
+                    "streams": {},
+                    "done": False,
+                    "result": None,
+                    "error": None,
+                }
+            thread = threading.Thread(
+                target=_run_compile_job,
+                args=(job_id, prompt, n),
+                daemon=True,
+            )
+            thread.start()
+            self._json({"job_id": job_id}, 202)
+            return
         try:
             result = _compile(prompt, n=n)
         except Exception as exc:
@@ -146,8 +275,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/compile/status":
+            qs = parse_qs(urlparse(self.path).query)
+            job_id = (qs.get("job_id") or [""])[0].strip()
+            if not job_id:
+                self._json({"error": "missing job_id"}, 400)
+                return
+            with _JOBS_LOCK:
+                job = _COMPILE_JOBS.get(job_id)
+            if not job:
+                self._json({"error": "unknown job_id"}, 404)
+                return
+            payload: dict = {
+                "done": job["done"],
+                "lines": list(job["lines"]),
+            }
+            streams = job.get("streams") or {}
+            if streams:
+                payload["streams"] = dict(streams)
+            err = job.get("error")
+            if err:
+                payload["error"] = err
+            res = job.get("result")
+            if res is not None:
+                payload["result"] = res
+            self._json(payload)
+            if job["done"]:
+                with _JOBS_LOCK:
+                    _COMPILE_JOBS.pop(job_id, None)
+            return
         if path == "/api/health":
-            self._json({"status": "ok", "model": getattr(_backend(), "name", "unknown")})
+            self._json(_health_dict())
             return
         if path in ("/", ""):
             path = "/index.html"
@@ -166,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self._cors()
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write(f"{self.address_string()} — {fmt % args}\n")
@@ -188,7 +346,7 @@ def main() -> None:
     for offset in range(32):
         cand = base_port + offset
         try:
-            httpd = HTTPServer(("", cand), Handler)
+            httpd = ThreadingHTTPServer(("", cand), Handler)
             port = cand
             break
         except OSError as exc:
@@ -207,7 +365,7 @@ def main() -> None:
 
     # Pre-warm the backend so first compile isn't slow on cold start.
     try:
-        b = _backend()
+        b = get_backend()
         print(f"[server] Backend ready: {getattr(b, 'name', 'unknown')}", file=sys.stderr)
     except Exception as exc:
         print(f"[server] Backend init failed at boot: {exc}", file=sys.stderr)

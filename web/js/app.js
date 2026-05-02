@@ -443,6 +443,12 @@ function showWorkspace() {
 }
 
 function showLanding() {
+  if (compileAbort) {
+    compileAbort.abort();
+    compileAbort = null;
+  }
+  stopCompilePipelineVisual();
+
   $("landing").hidden = false;
   $("workspace").hidden = true;
   document.body.classList.remove("in-workspace");
@@ -479,9 +485,50 @@ function showLanding() {
 }
 
 function setModelLabel(model) {
-  const m = model || "mock";
+  const m = model || "Gemma-4";
   $("modelPill").textContent = `Model: ${m}`;
   $("modelPillNav").textContent = `Model · ${m}`;
+}
+
+/** Sync nav pills + footer with server /api/health (hosted Gemma-4 vs local GGUF). */
+function applyBackendMeta(d) {
+  if (!d) return;
+  if (d.model) setModelLabel(d.model);
+
+  const kRaw = d.backend_kind;
+  if (kRaw == null || String(kRaw) === "") return;
+
+  const k = String(kRaw);
+  const hostedEl = document.getElementById("footHostedLine");
+  const plugEl = document.getElementById("footGgufPlug");
+  const ftEl = document.getElementById("footFtLine");
+
+  if (k === "fine_tuned") {
+    if (hostedEl) hostedEl.hidden = true;
+    if (plugEl) plugEl.hidden = true;
+    if (ftEl) {
+      ftEl.hidden = false;
+      const gf = $("footGgufName");
+      if (gf && d.gguf_file) gf.textContent = String(d.gguf_file);
+    }
+  } else {
+    if (hostedEl) hostedEl.hidden = false;
+    if (plugEl) plugEl.hidden = false;
+    if (ftEl) ftEl.hidden = true;
+    const mid = $("footApiModelId");
+    if (mid) mid.textContent = d.api_model_id ? String(d.api_model_id) : "hosted";
+  }
+}
+
+async function refreshBackendMeta() {
+  try {
+    const res = await fetch("/api/health");
+    if (!res.ok) return;
+    const data = await res.json();
+    applyBackendMeta(data);
+  } catch {
+    /* keep static HTML defaults */
+  }
 }
 
 let lastSequence = "";
@@ -699,6 +746,319 @@ function moveParetoTip(tip, frame, ev) {
   tip.style.top = `${ev.clientY - rect.top + 12}px`;
 }
 
+/** Client-side compile pipeline animation (real work is one POST — phases are staged UX). */
+const COMPILE_PHASES = [
+  {
+    title: "Neural handshake",
+    sub: "Generative Language API · Gemma-4 binding",
+    ticker: "Establishing session to hosted inference…",
+    bar: 10,
+    atMs: 0,
+  },
+  {
+    title: "Output contract",
+    sub: "<|channel>thought · ATCG-only DNA strip",
+    ticker: "Locking DGene compiler output envelope…",
+    bar: 21,
+    atMs: 950,
+  },
+  {
+    title: "Design sampling",
+    sub: "Sequential completions · temperature ladder",
+    ticker: "Drawing diverse candidate constructs from your brief…",
+    bar: 46,
+    atMs: 2600,
+  },
+  {
+    title: "Construct extraction",
+    sub: "Thought strip · alphabet gate · parse",
+    ticker: "Extracting sequences & validating bases…",
+    bar: 64,
+    atMs: 6800,
+  },
+  {
+    title: "Static passes",
+    sub: "ORF · GC · repeats · hygiene screens",
+    ticker: "Scoring candidates for lab plausibility…",
+    bar: 81,
+    atMs: 13800,
+  },
+  {
+    title: "Rank & Pareto",
+    sub: "Composite score · non-dominated front",
+    ticker: "Ordering candidates & picking default best…",
+    bar: 94,
+    atMs: 23500,
+  },
+];
+
+let compilePipelineCleanup = null;
+/** @type {AbortController | null} */
+let compileAbort = null;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function formatElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+/** Latest line in ticker; scrollback in monospace panel */
+function updateLiveCompileTrace(lines) {
+  const pre = $("compileDebugLog");
+  const ticker = $("compileTicker");
+  const safe = Array.isArray(lines) ? lines : [];
+  if (pre) {
+    pre.textContent = safe.join("\n");
+    pre.hidden = safe.length === 0;
+    pre.scrollTop = pre.scrollHeight;
+  }
+  if (ticker && safe.length) {
+    ticker.textContent = safe[safe.length - 1];
+  }
+}
+
+async function pollCompileJob(jobId, signal, onLines, onStreams) {
+  const url = `/api/compile/status?job_id=${encodeURIComponent(jobId)}`;
+  while (true) {
+    const res = await fetch(url, { signal });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (typeof onLines === "function") onLines(data.lines || []);
+    if (typeof onStreams === "function") onStreams(data.streams || {});
+    if (data.done) {
+      if (data.error) throw new Error(data.error);
+      return data.result;
+    }
+    await sleep(380);
+  }
+}
+
+/** Partial raw output per candidate (streamGenerateContent SSE). */
+function updateLiveStreams(streams) {
+  const wrap = $("compileLiveStream");
+  const pre = $("compileLivePre");
+  if (!wrap || !pre) return;
+  const keys = Object.keys(streams || {});
+  if (!keys.length) {
+    wrap.hidden = true;
+    pre.textContent = "";
+    return;
+  }
+  wrap.hidden = false;
+  wrap.open = true;
+  keys.sort();
+  pre.textContent = keys.map((k) => `── ${k} ──\n${streams[k]}`).join("\n\n");
+  pre.scrollTop = pre.scrollHeight;
+}
+
+/** Real backend trace (no fake timed phases). */
+function startLiveCompilePipeline() {
+  stopCompilePipelineVisual();
+
+  const pipe = $("compilePipeline");
+  const thought = $("thoughtText");
+  const fill = $("compilePipelineFill");
+  const barWrap = document.querySelector(".compile-pipeline-bar");
+  const ticker = $("compileTicker");
+  const elapsedEl = $("compileElapsed");
+  const chip = $("compileChip");
+  const slot = $("compileStepSlot");
+  const counter = $("compileStepCounter");
+  const pre = $("compileDebugLog");
+  const idleHint = $("terminalIdleHint");
+
+  if (thought) thought.hidden = true;
+  if (idleHint) idleHint.hidden = true;
+  if (pipe) {
+    pipe.hidden = false;
+    pipe.setAttribute("aria-busy", "true");
+  }
+  if (chip) chip.textContent = "Gemma-4";
+  if (counter) counter.textContent = "Live backend trace";
+  if (slot) slot.innerHTML = "";
+  if (ticker) ticker.textContent = "Connecting to compiler job…";
+  if (pre) {
+    pre.textContent = "";
+    pre.hidden = true;
+  }
+  if (fill) fill.style.width = "32%";
+  if (barWrap) barWrap.setAttribute("aria-valuenow", "32");
+
+  const t0 = Date.now();
+  const elapsedIv = setInterval(() => {
+    if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - t0);
+  }, 380);
+
+  const barNudge = setInterval(() => {
+    if (!fill) return;
+    const w = 22 + ((Date.now() / 2800) % 1) * 58;
+    fill.style.width = `${w.toFixed(0)}%`;
+    if (barWrap) barWrap.setAttribute("aria-valuenow", String(Math.round(w)));
+  }, 420);
+
+  compilePipelineCleanup = () => {
+    clearInterval(elapsedIv);
+    clearInterval(barNudge);
+    if (pipe) {
+      pipe.hidden = true;
+      pipe.setAttribute("aria-busy", "false");
+    }
+    if (thought) thought.hidden = false;
+    if (fill) fill.style.width = "4%";
+    if (barWrap) barWrap.setAttribute("aria-valuenow", "0");
+    if (elapsedEl) elapsedEl.textContent = "0:00";
+    if (pre) {
+      pre.textContent = "";
+      pre.hidden = true;
+    }
+    const live = $("compileLiveStream");
+    const livePre = $("compileLivePre");
+    if (live) {
+      live.hidden = true;
+      live.open = false;
+    }
+    if (livePre) livePre.textContent = "";
+    if (counter) counter.textContent = `Step 1 / ${COMPILE_PHASES.length}`;
+    const ch = $("compileChip");
+    if (ch) ch.textContent = "Gemma-4";
+    const tick = $("compileTicker");
+    if (tick) tick.textContent = "Idle · compile to stream logs";
+    const idleH = $("terminalIdleHint");
+    if (idleH) idleH.hidden = false;
+  };
+}
+
+function stopCompilePipelineVisual() {
+  if (typeof compilePipelineCleanup === "function") {
+    compilePipelineCleanup();
+    compilePipelineCleanup = null;
+  }
+}
+
+function renderPipelineStepSlot(slot, counter, i, mode) {
+  const ph = COMPILE_PHASES[i];
+  if (!ph || !slot) return;
+  const isDone = mode === "done";
+  const glyph = isDone ? "✓" : "●";
+  const cls = isDone ? "is-done" : "is-active";
+  slot.innerHTML = `
+    <div class="compile-step compile-step--solo ${cls}">
+      <span class="compile-step-glyph" aria-hidden="true">${glyph}</span>
+      <span class="compile-step-body">
+        <span class="compile-step-title">${escapeHtml(ph.title)}</span>
+        <span class="compile-step-sub">${escapeHtml(ph.sub)}</span>
+      </span>
+    </div>`;
+  if (counter) counter.textContent = `Step ${i + 1} / ${COMPILE_PHASES.length}`;
+}
+
+function finishCompilePipelineSuccess() {
+  const slot = $("compileStepSlot");
+  const counter = $("compileStepCounter");
+  const fill = $("compilePipelineFill");
+  const barWrap = document.querySelector(".compile-pipeline-bar");
+  const ticker = $("compileTicker");
+  const last = COMPILE_PHASES.length - 1;
+  renderPipelineStepSlot(slot, counter, last, "done");
+  if (fill) fill.style.width = "100%";
+  if (barWrap) barWrap.setAttribute("aria-valuenow", "100");
+  if (ticker) ticker.textContent = "Pipeline complete · streaming reasoning…";
+}
+
+function startCompilePipeline(numCandidates) {
+  stopCompilePipelineVisual();
+
+  const pipe = $("compilePipeline");
+  const thought = $("thoughtText");
+  const fill = $("compilePipelineFill");
+  const barWrap = document.querySelector(".compile-pipeline-bar");
+  const ticker = $("compileTicker");
+  const elapsedEl = $("compileElapsed");
+  const chip = $("compileChip");
+  const slot = $("compileStepSlot");
+  const counter = $("compileStepCounter");
+
+  if (thought) thought.hidden = true;
+  if (pipe) {
+    pipe.hidden = false;
+    pipe.setAttribute("aria-busy", "true");
+  }
+  if (chip) chip.textContent = "Gemma-4";
+
+  let phasePtr = 0;
+  let variantRot = 1;
+
+  function applyMetrics(i) {
+    phasePtr = i;
+    const ph = COMPILE_PHASES[i];
+    if (!ph) return;
+    if (fill) fill.style.width = `${ph.bar}%`;
+    if (barWrap) barWrap.setAttribute("aria-valuenow", String(Math.round(ph.bar)));
+    if (ticker) ticker.textContent = ph.ticker;
+    if (chip) {
+      if (i <= 1) chip.textContent = "Gemma-4";
+      else if (i >= 2 && i <= 4) chip.textContent = `Variant ${variantRot}/${numCandidates}`;
+      else chip.textContent = "Rank";
+    }
+  }
+
+  renderPipelineStepSlot(slot, counter, 0, "active");
+  applyMetrics(0);
+
+  const timers = [];
+  const transitionTimers = [];
+
+  COMPILE_PHASES.forEach((ph, i) => {
+    if (i === 0) return;
+    timers.push(
+      setTimeout(() => {
+        renderPipelineStepSlot(slot, counter, i - 1, "done");
+        transitionTimers.push(
+          setTimeout(() => {
+            renderPipelineStepSlot(slot, counter, i, "active");
+            applyMetrics(i);
+          }, 420)
+        );
+      }, ph.atMs)
+    );
+  });
+
+  const t0 = Date.now();
+  const elapsedIv = setInterval(() => {
+    if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - t0);
+  }, 380);
+
+  const candIv = setInterval(() => {
+    if (phasePtr >= 2 && phasePtr <= 4) {
+      variantRot = (variantRot % numCandidates) + 1;
+      if (chip) chip.textContent = `Variant ${variantRot}/${numCandidates}`;
+    }
+  }, 2400);
+
+  compilePipelineCleanup = () => {
+    timers.forEach((id) => clearTimeout(id));
+    transitionTimers.forEach((id) => clearTimeout(id));
+    clearInterval(elapsedIv);
+    clearInterval(candIv);
+    if (pipe) {
+      pipe.hidden = true;
+      pipe.setAttribute("aria-busy", "false");
+    }
+    if (thought) thought.hidden = false;
+    if (fill) fill.style.width = "4%";
+    if (barWrap) barWrap.setAttribute("aria-valuenow", "0");
+    if (elapsedEl) elapsedEl.textContent = "0:00";
+    if (slot) slot.innerHTML = "";
+    const ch = $("compileChip");
+    if (ch) ch.textContent = "Gemma-4";
+  };
+}
+
 /** Switch the active candidate and re-render every dependent surface. */
 function selectCandidate(id, { animatePasses = false } = {}) {
   const cand = getCandidate(id);
@@ -742,7 +1102,7 @@ async function compile() {
 
   $("userBubbleText").textContent = prompt;
   $("userBubble").hidden = false;
-  $("thoughtText").textContent = "Calling compiler…";
+  $("thoughtText").textContent = "";
   badge.textContent = "Running";
   badge.classList.remove("done");
   $("metrics").hidden = true;
@@ -753,17 +1113,36 @@ async function compile() {
   $("passesList").innerHTML = "";
   $("candidatesList").innerHTML = "";
 
+  const nCand = 4;
+  startLiveCompilePipeline();
+  compileAbort = new AbortController();
+
   btn.disabled = true;
-  hint.textContent = "Compiling…";
+  hint.textContent =
+    "Live trace below · hosted Gemma (parallel) + static passes — stalls usually mean API still generating";
 
   try {
     const res = await fetch("/api/compile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, n: 4 }),
+      body: JSON.stringify({ prompt, n: nCand, progress: true }),
+      signal: compileAbort.signal,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+
+    let data;
+    if (res.status === 202) {
+      const meta = await res.json();
+      if (!meta.job_id) throw new Error("Server did not return job_id");
+      data = await pollCompileJob(
+        meta.job_id,
+        compileAbort.signal,
+        updateLiveCompileTrace,
+        updateLiveStreams
+      );
+    } else {
+      data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.statusText);
+    }
 
     setModelLabel(data.model);
 
@@ -778,6 +1157,10 @@ async function compile() {
       const paretoCount = state.candidates.filter((c) => c.is_pareto).length;
       extrasMeta.textContent = `${state.candidates.length} candidates · ${paretoCount}★ · ${data.model}`;
     }
+
+    finishCompilePipelineSuccess();
+    await sleep(420);
+    stopCompilePipelineVisual();
 
     // Wire up everything for the BEST candidate first; reveal as we go.
     const seq = cleanSeq(best.sequence);
@@ -806,12 +1189,21 @@ async function compile() {
     $("seqCard").hidden = false;
     $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
   } catch (e) {
+    if (e.name === "AbortError") {
+      hint.textContent = "Compile cancelled";
+      badge.textContent = "…";
+      $("thoughtText").textContent = "";
+      stopCompilePipelineVisual();
+      return;
+    }
     console.error(e);
     hint.textContent = e.message || "Compile failed";
+    stopCompilePipelineVisual();
     $("thoughtText").textContent = `Something went wrong: ${hint.textContent}`;
     badge.textContent = "Error";
     badge.classList.remove("done");
   } finally {
+    compileAbort = null;
     btn.disabled = false;
   }
 }
@@ -860,6 +1252,10 @@ $("seqCopyBtn").addEventListener("click", async () => {
   }
 });
 
-const plasmidViewport = $("viewport");
-const plasmidSvgEl = $("plasmidSvg");
 if (plasmidViewport && plasmidSvgEl) attachPlasmidNav(plasmidSvgEl, plasmidViewport);
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", refreshBackendMeta);
+} else {
+  refreshBackendMeta();
+}
