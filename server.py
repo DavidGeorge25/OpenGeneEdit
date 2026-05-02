@@ -104,7 +104,18 @@ def _apply_rag_substitution(thought: str, sequence: str, *, candidate_id: str = 
             log_context=candidate_id,
         )
         rag_detail = dict(rag_detail)
-        rag_detail["map_slots"] = extract_part_map_slots(thought)
+        map_slots = extract_part_map_slots(thought)
+        parts_list = rag_detail.get("parts")
+        if isinstance(parts_list, list):
+            for idx, slot in enumerate(map_slots):
+                if idx < len(parts_list):
+                    p = parts_list[idx]
+                    if isinstance(p, dict):
+                        slot["verified"] = bool(p.get("verified"))
+                        src = p.get("sequence_source")
+                        if isinstance(src, str) and src:
+                            slot["sequence_source"] = src
+        rag_detail["map_slots"] = map_slots
         return final_seq, rag_detail
     except Exception as exc:
         flat = "".join((sequence or "").upper().split())

@@ -11,6 +11,11 @@ Environment:
   • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to **substitute** registry DNA for a
     slot (default ``0.6``). Below threshold the model's DNA slice for that slot is kept.
 
+  • **NCBI Gene fallback** (``ncbi_gene.py``) — when iGEM does not verify a CDS-like slot,
+    Entrez Gene + RefSeq nucleotide is queried for the symbol (e.g. ``PhzR``). Set
+    ``NCBI_API_KEY`` or ``DGENE_NCBI_API_KEY`` for 10 req/s (free at NCBI). ``DGENE_NCBI=0``
+    disables. See ``.env.example``.
+
 Logging (stderr): Every compile prints chroma query strings, ``ALIAS HIT:`` lines for the
 alias table, per-slot hits (part_name, sim, bp), and sequence length before/after RAG.
 Set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` for extra retrieval hit lists.
@@ -29,6 +34,8 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+from ncbi_gene import fetch_gene_cds, gene_symbol_eligible_for_ncbi
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_JSONL = os.path.join(_MODULE_DIR, "igem_dataset.jsonl")
@@ -53,6 +60,15 @@ _LOCK = threading.Lock()
 _CLIENT = None
 _COLLECTION_HANDLE = None
 _MODEL = None
+
+# Registry-derived vocabulary (built once from igem_dataset.jsonl, cached on disk).
+# Key = token.lower(), value = {"display": "amilCP", "part_type": "CDS",
+# "occurrences": N}. Lets `extract_part_names` recognize any iGEM-registered
+# gene/protein/promoter token without us having to hard-code it in
+# `_GENERIC_PARTS`. See `_ensure_registry_token_index`.
+_REGISTRY_TOKEN_INDEX: Optional[Dict[str, Dict[str, Any]]] = None
+_REGISTRY_TOKEN_LOCK = threading.Lock()
+_REGISTRY_TOKEN_CACHE_VERSION = 2
 
 
 def _jsonl_path() -> str:
@@ -537,6 +553,7 @@ _B_PART_RE = re.compile(r"\bB\d{4}\b")
 # (canonical_name, default_type_hint). Default applies when surrounding context doesn't
 # already yield a stronger type hint via :func:`_scan_window_for_type`.
 _GENERIC_PARTS: Tuple[Tuple[str, Optional[str]], ...] = (
+    # --- Fluorescent / chromoproteins (iGEM standards) -----------------------
     ("sfGFP", "CDS"),
     ("eGFP", "CDS"),
     ("mGFP", "CDS"),
@@ -545,20 +562,87 @@ _GENERIC_PARTS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("mRFP", "CDS"),
     ("RFP", "CDS"),
     ("mCherry", "CDS"),
+    ("mScarlet", "CDS"),
+    ("mOrange", "CDS"),
+    ("mTurquoise", "CDS"),
+    ("mPlum", "CDS"),
+    ("mTagBFP2", "CDS"),
+    ("mTagBFP", "CDS"),
+    ("dsRed", "CDS"),
+    ("dTomato", "CDS"),
     ("YFP", "CDS"),
     ("CFP", "CDS"),
+    ("BFP", "CDS"),
+    ("Citrine", "CDS"),
+    ("Venus", "CDS"),
+    ("Cerulean", "CDS"),
+    ("Sapphire", "CDS"),
+    ("amilCP", "CDS"),
+    ("amilGFP", "CDS"),
+    ("eforRed", "CDS"),
+    ("eforBlue", "CDS"),
+    ("fwYellow", "CDS"),
+    ("aeBlue", "CDS"),
+    ("cjBlue", "CDS"),
+    ("amajLime", "CDS"),
+    ("scOrange", "CDS"),
+    ("spisPink", "CDS"),
+    ("asPink", "CDS"),
+    ("mRojoA", "CDS"),
+    # --- Bioluminescence ---------------------------------------------------
     ("luxAB", "CDS"),
     ("luxCDABE", "CDS"),
+    # --- Quorum sensing transcription factors / synthases ------------------
     ("LuxR", "CDS"),
     ("LuxI", "CDS"),
-    ("Plux", "Promoter"),
+    ("LasR", "CDS"),
+    ("LasI", "CDS"),
+    ("RhlR", "CDS"),
+    ("RhlI", "CDS"),
+    ("AhlR", "CDS"),
+    ("AhlI", "CDS"),
+    ("CinR", "CDS"),
+    ("CinI", "CDS"),
+    ("EsaR", "CDS"),
+    ("EsaI", "CDS"),
+    ("TraR", "CDS"),
+    ("TraI", "CDS"),
+    # --- Two-component / metabolite sensor regulators ----------------------
+    ("LldR", "CDS"),
+    ("LldP", "CDS"),
+    ("PhzR", "CDS"),
+    ("PhzI", "CDS"),
+    ("OhhR", "CDS"),
+    ("PbrR", "CDS"),
+    ("MerR", "CDS"),
+    ("ArsR", "CDS"),
+    ("CueR", "CDS"),
+    ("ZntR", "CDS"),
+    ("CadC", "CDS"),
+    ("OmpR", "CDS"),
+    ("EnvZ", "CDS"),
+    ("ToxR", "CDS"),
+    # --- Common regulators -------------------------------------------------
     ("lacI", "CDS"),
     ("tetR", "CDS"),
     ("araC", "CDS"),
     ("cI", "CDS"),
-    ("PbrR", "CDS"),
+    # --- Operators (no type hint -> "operator" subcategory in map) ---------
     ("lacO", None),
     ("tetO", None),
+    # --- Promoters ---------------------------------------------------------
+    ("Plux", "Promoter"),
+    ("PluxR", "Promoter"),
+    ("PlasR", "Promoter"),
+    ("PlasI", "Promoter"),
+    ("PrhlR", "Promoter"),
+    ("PcinR", "Promoter"),
+    ("PtraR", "Promoter"),
+    ("PlldR", "Promoter"),
+    ("Plld", "Promoter"),
+    ("PphzR", "Promoter"),
+    ("Pphz", "Promoter"),
+    ("Phyb", "Promoter"),
     ("PbrA", "Promoter"),
     ("pBAD", "Promoter"),
     ("pTet", "Promoter"),
@@ -568,6 +652,38 @@ _GENERIC_PARTS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("Ptrc", "Promoter"),
     ("pT7", "Promoter"),
     ("T7", "Promoter"),
+)
+
+
+# Camel/mixed-case identifiers in iGEM thoughts that aren't in `_GENERIC_PARTS`
+# (novel sensor regulators, custom hybrid promoters, etc.). We only accept matches
+# when a part-type keyword sits within ±60 chars to keep false positives off
+# (English words rarely sit next to "promoter"/"CDS"/"RBS"/"terminator").
+_CAMEL_GENE_RE = re.compile(
+    r"\b("
+    r"[A-Z][a-z]{1,5}[A-Z][A-Za-z0-9]{0,6}"      # PascalCase + internal cap (PhzR, LldR, ToxR, OmpA)
+    r"|[a-z]{2,6}[A-Z]{2,5}[a-z0-9]?"            # lowercase prefix + caps (amilCP, eforRed, dsRed, sfGFP)
+    r"|[a-z][A-Z][A-Za-z0-9]{2,8}"               # leading-lower + cap (mCherry, mScarlet, dTomato)
+    r")\b"
+)
+
+# Tokens that match the camelCase shape but are NEVER a gene/part — keeps the
+# fallback from polluting slots with English/biology jargon or restriction sites.
+_CAMEL_GENE_BLOCKLIST = frozenset({
+    "BBa", "iGEM", "DNA", "RNA", "mRNA", "tRNA", "rRNA", "ATP", "ADP", "GTP",
+    "PCR", "RBS", "CDS", "ORF", "UTR", "TSS", "kDa", "AND", "NOR", "NAND", "XOR",
+    "EcoRI", "XbaI", "SpeI", "PstI", "NotI", "BamHI", "HindIII", "PvuI", "PvuII",
+    "BsaI", "SapI", "BsmBI", "AarI",
+    "OK", "API", "URL", "JSON",
+})
+
+# Part-type words within ±60 chars qualify a camelCase token as a real slot.
+_CAMEL_TYPE_CONTEXT_RE = re.compile(
+    r"\b(promoter|promotor|terminator|rbs|cds|coding\s+sequence|coding\s+region|"
+    r"open\s+reading\s+frame|operator|expression|expressed|drives?|driving|"
+    r"encodes?|encoding|chromoprotein|fluorescent\s+protein|reporter|sensor|"
+    r"transcription\s+factor|repressor|activator|protein|gene)\b",
+    re.IGNORECASE,
 )
 
 
@@ -592,12 +708,18 @@ _TYPE_KEYWORDS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _classify_window(window: str) -> Optional[str]:
+def _classify_window(window: str, *, max_offset: Optional[int] = None) -> Optional[str]:
     """Return the part type whose keyword appears at the smallest offset in ``window``.
 
     Picking the nearest keyword (rather than a fixed priority order) keeps each part name
     bound to *its* type word — so in ``"B0034 RBS, sfGFP coding sequence, B0015 terminator"``
     each name resolves to the right type even though all three keywords are in range.
+
+    ``max_offset`` (optional) rejects matches that sit further than that many chars
+    from the start of the window. This handles cases like
+    ``"the terminator B0015 follows the RBS B0034"`` where the cut after-window
+    for ``B0015`` is ``" follows the RBS "`` — the ``RBS`` keyword is 13 chars in,
+    really belongs to ``B0034``, and should not bind to ``B0015``.
     """
 
     padded = f" {window} "
@@ -608,7 +730,16 @@ def _classify_window(window: str) -> Optional[str]:
             continue
         if best is None or idx < best[0]:
             best = (idx, label)
-    return best[1] if best else None
+    if best is None:
+        return None
+    if max_offset is not None and best[0] - 1 > max_offset:
+        return None
+    return best[1]
+
+
+_PART_TOKEN_BOUNDARY_RE = re.compile(
+    r"\b(?:BBa_[A-Z]\d{4,5}[a-zA-Z]?|J\d{5}|B\d{4})\b"
+)
 
 
 def _scan_window_for_type(
@@ -617,22 +748,41 @@ def _scan_window_for_type(
     end: int,
     *,
     span_after: int = 40,
-    span_before: int = 20,
+    span_before: int = 12,
 ) -> Optional[str]:
     """Look around a regex match for a part-type keyword.
 
     iGEM convention is ``<part_name> <type_word>`` (``B0034 RBS``, ``B0015 terminator``,
-    ``J23100 promoter``). Prefer the chars *immediately after* the match, then fall back
-    to a small window *before* it. A narrow window prevents one type word at the start
-    of a long sentence from contaminating every part name in the rest of the sentence.
+    ``J23100 promoter``). The after-window is searched first and **cut at the next
+    BBa_/B####/J##### identifier** so a type word like ``RBS`` in
+    ``"amilCP expression via a B0034 RBS"`` binds to ``B0034`` rather than leaking
+    back to ``amilCP``.
+
+    The before-window catches the rare reversed-order convention
+    (``"terminator B0015"``, ``"RBS B0034"``) and is rejected if a sentence
+    boundary (``.`` / ``;`` / ``!``) or any other part identifier sits inside
+    it — otherwise ``"B0015 terminator. lacI represses…"`` would mis-type
+    ``lacI`` as a terminator and ``"T7 promoter drives sfGFP"`` would mis-type
+    ``sfGFP`` as a promoter.
     """
 
-    after = text[end : end + span_after].lower()
-    hit_after = _classify_window(after)
+    after_full = text[end : end + span_after]
+    next_part = _PART_TOKEN_BOUNDARY_RE.search(after_full)
+    after = (after_full if not next_part else after_full[: next_part.start()]).lower()
+    # When the after-window is followed by another part identifier, only
+    # accept type words that sit close to the *current* part (within 8 chars).
+    # Otherwise the type word is in the immediate-precedence zone of the next
+    # part and belongs to it (reverse-order convention: ``"... follows the RBS B0034"``).
+    after_max_offset = 8 if next_part is not None else None
+    hit_after = _classify_window(after, max_offset=after_max_offset)
     if hit_after is not None:
         return hit_after
-    before = text[max(0, start - span_before) : start].lower()
-    return _classify_window(before)
+    before_full = text[max(0, start - span_before) : start]
+    if _PART_TOKEN_BOUNDARY_RE.search(before_full):
+        return None
+    if any(ch in before_full for ch in ".;!"):
+        return None
+    return _classify_window(before_full.lower())
 
 
 def _b_part_type_prior(name: str) -> Optional[str]:
@@ -649,6 +799,183 @@ def _b_part_type_prior(name: str) -> Optional[str]:
     return None
 
 
+# --- Registry-derived vocabulary (built from full igem_dataset.jsonl, cached) -------
+# Drives `extract_part_names` so any iGEM-registered protein/promoter/operator name
+# appearing in the model's reasoning becomes its own slot — rather than relying on a
+# tiny hardcoded list. Without this, slots like `amilCP` / `lacZ` / `LldR` would only
+# match if we'd manually added them to `_GENERIC_PARTS`, and any other 30k registered
+# parts would silently be lost from the construct map.
+
+# Token shapes that look like iGEM gene/protein/promoter names. Loose on purpose —
+# the registry membership check below is the actual filter, so false-positive
+# *shapes* are fine as long as they aren't real parts.
+_REGISTRY_TOKEN_RE = re.compile(
+    r"\b("
+    r"[A-Z]{2,5}\d{0,2}"                          # GFP, RFP, T7, T1
+    r"|[a-z]{1,6}[A-Z][A-Za-z0-9]{0,8}"           # lacI, tetR, mCherry, amilCP, sfGFP, dTomato
+    r"|[A-Z][a-z]{1,6}[A-Z][A-Za-z0-9]{0,6}"      # LldR, PhzR, ToxR, OmpA, AraC
+    r")\b"
+)
+
+# Tokens that LOOK gene-shaped but should never be slots even if a part description
+# happens to mention them (English jargon, methods, units, restriction enzymes,
+# chemical inducers / small-molecule ligands).
+_REGISTRY_TOKEN_STOP = frozenset(s.lower() for s in (
+    "DNA", "RNA", "mRNA", "tRNA", "rRNA", "ATP", "ADP", "GTP", "NADH", "NADPH",
+    "PCR", "BBa", "iGEM", "RBS", "CDS", "ORF", "UTR", "TSS", "kDa", "pKa",
+    "EcoRI", "XbaI", "SpeI", "PstI", "NotI", "BamHI", "HindIII", "PvuI", "PvuII",
+    "BsaI", "SapI", "BsmBI", "AarI",
+    "AND", "NOR", "NAND", "XOR", "OR", "NOT", "OK", "API", "URL", "JSON", "FAQ",
+    "USA", "USSR", "UK", "EU", "Bp", "Kb", "Mb", "Da", "uL", "mL", "uM", "mM",
+    "From", "With", "For", "And", "The", "Of", "An", "In", "On", "At", "To",
+    "When", "Then", "If", "Else", "Use", "Uses", "Used", "Add", "Set",
+    "TE",  # "TE from coliphage T7" — terminator filler word, not a part name
+    # Chemical inducers / small-molecule ligands frequently named in part
+    # descriptions ("induced by IPTG", "AHL-responsive") but never themselves
+    # iGEM parts.
+    "IPTG", "aTc", "AHL", "ATc", "OHHL", "OC6HSL", "OC12HSL", "AI2",
+    "HSL", "AhL", "PoPS", "RiPS",
+))
+
+# Minimum number of registry rows a token must appear in before it counts as a real
+# part. Cuts one-off mentions / typos / rare incidental uses of English-ish words
+# that slipped past the stoplist.
+_REGISTRY_TOKEN_MIN_OCCURRENCES = 2
+
+
+def _registry_token_cache_path() -> str:
+    base = _chroma_path()
+    return os.path.join(os.path.abspath(base), "registry_tokens.json")
+
+
+def _build_registry_token_index() -> Dict[str, Dict[str, Any]]:
+    """One-pass scan of ``igem_dataset.jsonl`` building a token vocabulary.
+
+    For each row we extract gene-name-shaped tokens from ``short_desc`` and tally
+    their part_types. Result: ``{token_lower: {"display": "amilCP",
+    "part_type": "CDS", "occurrences": N}}``. Tokens that appear in only a
+    handful of rows are pruned by the caller (see ``_REGISTRY_TOKEN_MIN_OCCURRENCES``).
+    """
+
+    path = _jsonl_path()
+    if not os.path.isfile(path):
+        rag_always_log(
+            f"registry token index: dataset missing at {path!r} — "
+            f"falling back to hardcoded `_GENERIC_PARTS` only"
+        )
+        return {}
+
+    type_counts: Dict[str, Dict[str, int]] = {}
+    canonical_case: Dict[str, str] = {}
+    rows_seen = 0
+
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rows_seen += 1
+            short_desc = str(row.get("short_desc", ""))
+            part_type = str(row.get("part_type", ""))
+            if not short_desc or not part_type:
+                continue
+            for m in _REGISTRY_TOKEN_RE.finditer(short_desc):
+                tok = m.group(1)
+                if len(tok) < 2 or len(tok) > 16:
+                    continue
+                key = tok.lower()
+                if key in _REGISTRY_TOKEN_STOP:
+                    continue
+                bucket = type_counts.setdefault(key, {})
+                bucket[part_type] = bucket.get(part_type, 0) + 1
+                if key not in canonical_case:
+                    canonical_case[key] = tok
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, counts in type_counts.items():
+        occ = sum(counts.values())
+        if occ < _REGISTRY_TOKEN_MIN_OCCURRENCES:
+            continue
+        best_type = max(counts.items(), key=lambda kv: kv[1])[0]
+        out[key] = {
+            "display": canonical_case[key],
+            "part_type": best_type,
+            "occurrences": occ,
+        }
+
+    rag_always_log(
+        f"registry token index built: {len(out)} tokens kept "
+        f"(min_occ={_REGISTRY_TOKEN_MIN_OCCURRENCES}) from {rows_seen} JSONL rows"
+    )
+    return out
+
+
+def _ensure_registry_token_index() -> Dict[str, Dict[str, Any]]:
+    """Lazy, thread-safe loader with on-disk cache keyed by JSONL mtime.
+
+    Cache file lives next to the Chroma directory so it's already in
+    ``.gitignore`` and gets blown away when the dataset changes.
+    """
+
+    global _REGISTRY_TOKEN_INDEX
+    if _REGISTRY_TOKEN_INDEX is not None:
+        return _REGISTRY_TOKEN_INDEX
+    with _REGISTRY_TOKEN_LOCK:
+        if _REGISTRY_TOKEN_INDEX is not None:
+            return _REGISTRY_TOKEN_INDEX
+
+        cache_path = _registry_token_cache_path()
+        try:
+            jsonl_mtime = os.path.getmtime(_jsonl_path())
+        except OSError:
+            jsonl_mtime = 0.0
+
+        if os.path.isfile(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if (
+                    isinstance(data, dict)
+                    and data.get("version") == _REGISTRY_TOKEN_CACHE_VERSION
+                    and float(data.get("jsonl_mtime", 0.0)) == jsonl_mtime
+                    and isinstance(data.get("tokens"), dict)
+                ):
+                    _REGISTRY_TOKEN_INDEX = data["tokens"]
+                    rag_always_log(
+                        f"registry token index loaded from cache "
+                        f"({len(_REGISTRY_TOKEN_INDEX)} tokens, {cache_path!r})"
+                    )
+                    return _REGISTRY_TOKEN_INDEX
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                rag_debug_log(f"registry token cache unreadable ({exc!s}) — rebuilding")
+
+        _REGISTRY_TOKEN_INDEX = _build_registry_token_index()
+
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "version": _REGISTRY_TOKEN_CACHE_VERSION,
+                        "jsonl_mtime": jsonl_mtime,
+                        "tokens": _REGISTRY_TOKEN_INDEX,
+                    },
+                    fh,
+                )
+            rag_debug_log(
+                f"registry token cache written ({len(_REGISTRY_TOKEN_INDEX)} tokens) "
+                f"to {cache_path!r}"
+            )
+        except OSError as exc:
+            rag_debug_log(f"registry token cache write failed: {exc!s}")
+
+        return _REGISTRY_TOKEN_INDEX
+
+
 def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
     """Scan reasoning for explicit iGEM identifiers + canonical generic names.
 
@@ -662,13 +989,19 @@ def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
         return []
 
     events: List[Tuple[int, Optional[str], str]] = []
-    seen: set = set()
+    seen_names: set = set()
 
     def add(start: int, type_hint: Optional[str], name: str) -> None:
-        key = (type_hint or "", name.lower())
-        if key in seen:
+        # Dedupe by casefolded *name only* (not by (type, name)) so the same
+        # gene/protein appears at most once per construct, even when multiple
+        # passes (BBa, _GENERIC_PARTS, registry-vocab, camelCase) hit it with
+        # subtly different type guesses or different-case display strings.
+        # First-write wins, so the most-trusted pass (run earliest) sets the
+        # final type_hint.
+        key = name.casefold()
+        if key in seen_names:
             return
-        seen.add(key)
+        seen_names.add(key)
         q = f"{name} {type_hint}".strip() if type_hint else name
         events.append((start, type_hint, q))
 
@@ -687,6 +1020,61 @@ def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
         for m in re.finditer(rf"\b{re.escape(canonical)}\b", text, flags=re.IGNORECASE):
             type_hint = _scan_window_for_type(text, m.start(), m.end()) or default_type
             add(m.start(), type_hint, canonical)
+
+    # Registry-vocabulary pass: scan the thought for any token that exists in
+    # the full igem_dataset.jsonl vocabulary. This is the workhorse — it lets
+    # the system recognize ANY iGEM-registered gene/protein (amilCP, lacZ,
+    # cI857, dCas9, …) without us hard-coding every one in `_GENERIC_PARTS`.
+    # Failure to load the index degrades gracefully to the hardcoded list.
+    try:
+        registry_index = _ensure_registry_token_index()
+    except Exception as exc:  # noqa: BLE001 — never let vocab loading break extraction
+        rag_debug_log(f"registry token index load failed ({exc!s}) — skipping pass")
+        registry_index = {}
+
+    if registry_index:
+        for m in _REGISTRY_TOKEN_RE.finditer(text):
+            tok = m.group(1)
+            if not tok or len(tok) < 2 or len(tok) > 16:
+                continue
+            key = tok.lower()
+            if key in _REGISTRY_TOKEN_STOP:
+                continue
+            info = registry_index.get(key)
+            if not info:
+                continue  # token not in any iGEM short_desc — not a real part
+            display = info.get("display") or tok
+            default_type = info.get("part_type")
+            type_hint = _scan_window_for_type(text, m.start(), m.end()) or default_type
+            add(m.start(), type_hint, display)
+
+    # Context-gated camelCase fallback: catches truly novel proteins / custom
+    # promoters that aren't in the registry at all (e.g. PhzR/PhzI from
+    # Pyocyanin sensors, custom hybrid promoters). Without this, anything the
+    # model invents would be silently lost when the sequence is chunk-split
+    # during substitution.
+    canonical_lower = {c.lower() for c, _ in _GENERIC_PARTS}
+    for m in _CAMEL_GENE_RE.finditer(text):
+        token = m.group(1)
+        if not token or len(token) < 3 or len(token) > 14:
+            continue
+        if token in _CAMEL_GENE_BLOCKLIST:
+            continue
+        tlow = token.lower()
+        if tlow in canonical_lower:
+            continue  # already added via _GENERIC_PARTS pass
+        if registry_index and tlow in registry_index:
+            continue  # already added via registry-vocabulary pass
+        # Skip if this token is part of a BBa_/B####/J##### already captured
+        # (e.g. "B0034" would not match the camel regex anyway, but PhzR could
+        # appear inside "PhzR/PhzI" — we still want both as separate hits).
+        ctx_lo = max(0, m.start() - 60)
+        ctx_hi = min(len(text), m.end() + 60)
+        ctx = text[ctx_lo:ctx_hi]
+        if not _CAMEL_TYPE_CONTEXT_RE.search(ctx):
+            continue
+        type_hint = _scan_window_for_type(text, m.start(), m.end())
+        add(m.start(), type_hint, token)
 
     events.sort(key=lambda t: t[0])
     return [(th, q) for _, th, q in events]
@@ -833,6 +1221,16 @@ def apply_rag_substitution(
     rag_always_log(
         f"{ctx}: PART QUERY EXTRACTION strategy={parsing_strategy!r} count={len(queries)}"
     )
+    if queries and len(queries) <= 2 and len(seq_clean) >= 1000:
+        rag_always_log(
+            f"{ctx}: WARNING — only {len(queries)} slot(s) identified for a "
+            f"{len(seq_clean)} bp model sequence. Verified registry hits will "
+            f"replace large equal-chunk regions and any unrecognized parts "
+            f"(custom promoters, novel sensors, CDSs missing from "
+            f"`_GENERIC_PARTS`) will be lost. Add their canonical names to "
+            f"`_GENERIC_PARTS` in igem_rag.py so they register as their own "
+            f"slot and the model's DNA for that region is preserved."
+        )
     th_prev = (thought or "").strip()
     if th_prev:
         cap = 4000
@@ -888,40 +1286,25 @@ def apply_rag_substitution(
                 f"{ctx}: SLOT[{i}] chroma_query={query_text!r} type_filter={type_hint!r} → "
                 f"NO HITS | model_slice_bp={len(model_slice)} | substituted=False"
             )
-            merged.append(model_slice)
-            parts_out.append(
-                {
-                    "query": query_text,
-                    "retrieval_query": query_text,
-                    "part_type_filter": type_hint,
-                    "verified": False,
-                    "unverified": True,
-                    "substituted": False,
-                    "similarity": None,
-                    "best_candidate": None,
-                    "match_kind": None,
-                    "sequence_source": "model",
-                    "model_slice_bp": len(model_slice),
-                    "dna_replaced_vs_model_slice": False,
-                    "sequence": model_slice,
-                }
+        else:
+            verified_pre = sim >= thr
+            registry_seq_pre = "".join(best.sequence.upper().split())
+            mk_pre = getattr(best, "match_kind", "semantic") or "semantic"
+            rag_always_log(
+                f"{ctx}: SLOT[{i}] chroma_query={query_text!r} type_filter={type_hint!r} → "
+                f"hit={best.part_name!r} part_id={best.part_id} match_kind={mk_pre} "
+                f"sim={sim:.4f} thr={thr:.4f} verified={verified_pre} "
+                f"hit_bp={len(registry_seq_pre)} model_slice_bp={len(model_slice)} "
+                f"substitution_applied={verified_pre} "
+                f"dna_differs_from_model_slice={verified_pre and registry_seq_pre != model_slice}"
             )
-            continue
 
-        verified = sim >= thr
-        registry_seq = "".join(best.sequence.upper().split())
-        mk = getattr(best, "match_kind", "semantic") or "semantic"
-        dna_replaced = verified and registry_seq != model_slice
-
-        rag_always_log(
-            f"{ctx}: SLOT[{i}] chroma_query={query_text!r} type_filter={type_hint!r} → "
-            f"hit={best.part_name!r} part_id={best.part_id} match_kind={mk} "
-            f"sim={sim:.4f} thr={thr:.4f} verified={verified} "
-            f"hit_bp={len(registry_seq)} model_slice_bp={len(model_slice)} "
-            f"substitution_applied={verified} dna_differs_from_model_slice={dna_replaced}"
-        )
+        verified = best is not None and sim >= thr
 
         if verified:
+            registry_seq = "".join(best.sequence.upper().split())
+            mk = getattr(best, "match_kind", "semantic") or "semantic"
+            dna_replaced = registry_seq != model_slice
             merged.append(registry_seq)
             parts_out.append(
                 {
@@ -943,7 +1326,84 @@ def apply_rag_substitution(
                     "sequence": registry_seq,
                 }
             )
+            continue
+
+        # iGEM miss or below similarity threshold — try NCBI Gene (bacterial CDS).
+        sym = gene_symbol_eligible_for_ncbi(query_text, type_hint)
+        ncbi_hit = None
+        if sym:
+            try:
+                ncbi_hit = fetch_gene_cds(
+                    sym,
+                    thought=thought or "",
+                    log=lambda m: rag_always_log(f"{ctx}: {m}"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                rag_always_log(f"{ctx}: NCBI exception symbol={sym!r}: {exc!s}")
+
+        if ncbi_hit:
+            nseq = "".join(ncbi_hit.sequence.upper().split())
+            dna_ncbi = nseq != model_slice
+            rag_always_log(
+                f"{ctx}: SLOT[{i}] NCBI substitution symbol={sym!r} gene_id={ncbi_hit.gene_id} "
+                f"name={ncbi_hit.gene_name!r} org={ncbi_hit.organism!r} "
+                f"{ncbi_hit.accession}:{ncbi_hit.seq_from}-{ncbi_hit.seq_to} "
+                f"bp={len(nseq)} (iGEM verified=False)"
+            )
+            merged.append(nseq)
+            parts_out.append(
+                {
+                    "query": query_text,
+                    "retrieval_query": query_text,
+                    "part_type_filter": type_hint,
+                    "verified": True,
+                    "unverified": False,
+                    "substituted": True,
+                    "similarity": 1.0,
+                    "part_id": ncbi_hit.gene_id,
+                    "part_name": f"NCBI:{ncbi_hit.gene_name}",
+                    "part_type": "CDS",
+                    "short_desc": (
+                        f"NCBI Gene {ncbi_hit.gene_id} ({ncbi_hit.organism}) "
+                        f"{ncbi_hit.accession}:{ncbi_hit.seq_from}-{ncbi_hit.seq_to}"
+                    ),
+                    "match_kind": "ncbi-gene",
+                    "sequence_source": "ncbi",
+                    "ncbi_gene_id": ncbi_hit.gene_id,
+                    "ncbi_gene_name": ncbi_hit.gene_name,
+                    "ncbi_organism": ncbi_hit.organism,
+                    "ncbi_accession": ncbi_hit.accession,
+                    "ncbi_range": f"{ncbi_hit.seq_from}-{ncbi_hit.seq_to}",
+                    "ncbi_strand": ncbi_hit.strand,
+                    "model_slice_bp": len(model_slice),
+                    "dna_replaced_vs_model_slice": dna_ncbi,
+                    "sequence": nseq,
+                }
+            )
+            continue
+
+        if best is None:
+            merged.append(model_slice)
+            parts_out.append(
+                {
+                    "query": query_text,
+                    "retrieval_query": query_text,
+                    "part_type_filter": type_hint,
+                    "verified": False,
+                    "unverified": True,
+                    "substituted": False,
+                    "similarity": None,
+                    "best_candidate": None,
+                    "match_kind": None,
+                    "sequence_source": "model",
+                    "model_slice_bp": len(model_slice),
+                    "dna_replaced_vs_model_slice": False,
+                    "sequence": model_slice,
+                }
+            )
         else:
+            registry_seq = "".join(best.sequence.upper().split())
+            mk = getattr(best, "match_kind", "semantic") or "semantic"
             merged.append(model_slice)
             parts_out.append(
                 {

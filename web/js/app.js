@@ -217,7 +217,8 @@ function inferFeatures(L, mapSlots) {
       const color = SUB_COLOR[sub] || SUB_COLOR.feature;
       const start = Math.max(1, Math.round(pStart * L) + (pStart === 0 ? 0 : 1));
       const end = Math.max(start + 1, Math.round(pEnd * L));
-      out.push({ label, sub, pStart, pEnd, strand, color, start, end });
+      const unverified = s.verified === false;
+      out.push({ label, sub, pStart, pEnd, strand, color, start, end, unverified });
     }
     return out;
   }
@@ -412,9 +413,12 @@ function formatSeqTooltipPreview(seq, maxPreviewChars) {
 function buildFeatureTooltipHtml(f, subHuman, seg) {
   const safeSegAttr = escapeHtml(seg);
   const prev = formatSeqTooltipPreview(seg, 400);
+  const unvNote = f.unverified
+    ? `<br/><span class="feature-tooltip-note">* Sequence not verified (iGEM / NCBI); model or low-confidence DNA.</span>`
+    : "";
   return (
     `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
-    `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand</div>` +
+    `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}</div>` +
     `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
     `<button type="button" class="feature-tooltip-copy" data-copy-seq="${safeSegAttr}">` +
     `<span class="feature-tooltip-copy-label">Copy</span> segment</button>`
@@ -469,7 +473,15 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
       "text-anchor": anchor,
       class: "plasmid-feature-label plasmid-feature-hit",
     });
-    tName.textContent = f.label;
+    const tspanLabel = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    tspanLabel.textContent = f.label;
+    tName.appendChild(tspanLabel);
+    if (f.unverified) {
+      const tspanAst = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+      tspanAst.setAttribute("class", "plasmid-unverified-ast");
+      tspanAst.textContent = "*";
+      tName.appendChild(tspanAst);
+    }
     labels.appendChild(tName);
 
     const tSub = svgEl("text", {
@@ -490,10 +502,13 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
       path.classList.add("is-active");
       tip.classList.add("tooltip--rich");
       tip.hidden = false;
+      const unvNote = f.unverified
+        ? `<br/><span class="feature-tooltip-note">* Sequence not verified (iGEM / NCBI); model or low-confidence DNA.</span>`
+        : "";
       tip.innerHTML = showSeq
         ? buildFeatureTooltipHtml(f, subHuman, seg)
         : `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
-          `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand<br/>` +
+          `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}<br/>` +
           `<span class="feature-tooltip-note">No sequence loaded for this map.</span></div>`;
       moveTooltipAt(tip, frame, ev);
     };
@@ -817,8 +832,10 @@ function renderRagPanel(rag) {
 
   card.hidden = false;
   const minS = rag.min_similarity != null ? rag.min_similarity : 0.6;
-  const verified = parts.filter((p) => p.verified).length;
-  summary.textContent = `${verified}/${parts.length} parts substituted from iGEM at similarity ≥ ${minS}. Other slots keep model DNA (including below-threshold hits).`;
+  const nIgem = parts.filter((p) => p.sequence_source === "registry").length;
+  const nNcbi = parts.filter((p) => p.sequence_source === "ncbi").length;
+  const nModel = parts.length - nIgem - nNcbi;
+  summary.textContent = `${nIgem} iGEM (sim ≥ ${minS}) · ${nNcbi} NCBI Gene · ${nModel} model / unverified.`;
 
   list.innerHTML = "";
   for (const p of parts) {
@@ -826,7 +843,10 @@ function renderRagPanel(rag) {
     li.className = p.verified ? "is-verified" : "is-unverified";
     const title = document.createElement("div");
     title.className = "rag-part-title";
-    if (p.verified) {
+    if (p.sequence_source === "ncbi" && p.verified) {
+      const gn = p.ncbi_gene_name || p.part_name || "—";
+      title.textContent = `${gn} · NCBI Gene`;
+    } else if (p.verified) {
       title.textContent = `${p.part_name || "—"} · ${p.part_type || ""}`;
     } else if (p.part_name) {
       title.textContent = `${p.part_name} · model DNA kept (${p.reject_reason === "below_similarity_threshold" ? "below threshold" : "no verified hit"})`;
@@ -840,7 +860,13 @@ function renderRagPanel(rag) {
         ? Number(p.similarity).toFixed(3)
         : "—";
     const q = p.query || p.retrieval_query || "";
-    meta.textContent = p.verified ? `${q} · sim ${sim}` : `${q} · best sim ${sim}`;
+    if (p.sequence_source === "ncbi") {
+      const org = p.ncbi_organism ? String(p.ncbi_organism) : "";
+      const acc = p.ncbi_accession ? `${p.ncbi_accession}:${p.ncbi_range || ""}` : "";
+      meta.textContent = [q, org, acc].filter(Boolean).join(" · ");
+    } else {
+      meta.textContent = p.verified ? `${q} · sim ${sim}` : `${q} · best sim ${sim}`;
+    }
     li.appendChild(title);
     li.appendChild(meta);
     list.appendChild(li);

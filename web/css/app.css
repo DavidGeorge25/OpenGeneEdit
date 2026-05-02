@@ -1212,6 +1212,14 @@ body.in-workspace .artifact-body > * {
   font-weight: 600;
 }
 
+/* Subtle footnote on map labels: slot DNA is model / below-threshold, not iGEM or NCBI. */
+.plasmid-unverified-ast {
+  font-size: 0.58em;
+  font-weight: 500;
+  fill: #9ca3af;
+  baseline-shift: super;
+}
+
 .plasmid-feature-sub {
   fill: #6b7280;
   font-size: 10px;

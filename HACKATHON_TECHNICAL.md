@@ -36,17 +36,19 @@ User prompt
     → Inference (Gemma 4: Gemini API or GGUF)
         → Parsed (thought + DNA channel format)
             → iGEM RAG (optional Chroma + embeddings; slot-wise substitution)
-                → Compiler passes (lint / score)
-                    → Ranker (Pareto + composite sort)
-                        → UI (web or Streamlit): maps, exports, candidate table
+                → NCBI Gene fallback (optional Entrez CDS for symbols missing / unverified in iGEM)
+                    → Compiler passes (lint / score)
+                        → Ranker (Pareto + composite sort)
+                            → UI (web or Streamlit): maps, exports, candidate table, verified / unverified cues
 ```
 
 **Core modules**
 
 | Module | Role |
 |--------|------|
-| `inference.py` | Backend selection, Gemma prompting, parsing `<|channel>thought` / `<channel|>` / DNA / `</circuit>` |
-| `igem_rag.py` | JSONL → ChromaDB index; retrieval; **slot-based** merge with model DNA |
+| `inference.py` | Backend selection, Gemma prompting, parsing `<|channel>thought` / `<channel|>` / DNA / `</circuit>`; loads `.env` on import |
+| `igem_rag.py` | JSONL → ChromaDB index; retrieval; **slot-based** merge; registry token vocabulary; NCBI handoff |
+| `ncbi_gene.py` | NCBI Entrez (Gene → genomic slice) for bacterial CDS when iGEM slot is unverified |
 | `passes.py` | ORF, GC, repeats, Type IIS, restriction map, CAI, RBS heuristic, hairpins, etc. |
 | `ranker.py` | Objective vectors + Pareto front + composite ordering |
 | `server.py` | `ThreadingHTTPServer`, `/api/compile`, static `web/` |
@@ -56,7 +58,7 @@ User prompt
 
 ---
 
-## 2. iGEM registry → `igem_dataset.json`
+## 2. iGEM registry → `igem_dataset.jsonl`
 
 **Source.** The project expects a gzip’d XML export of the iGEM parts registry (`xml_parts.xml.gz` at repo root). This is **not** fetched by code in-repo; you obtain the dump and place it next to the extractor.
 
@@ -193,41 +195,90 @@ Both entry points use the same `inference.get_backend()` logic once `.env` is lo
 
 ---
 
-## 5. iGEM RAG — `igem_rag.py`
+## 5. iGEM RAG + NCBI fallback — `igem_rag.py` and `ncbi_gene.py`
 
-RAG here is **not** “retrieve chunks and stuff into the prompt.” It runs **after** the model emits a full sequence: it tries to **replace contiguous slices** of the model DNA with **registry sequences** when retrieval confidence is high enough.
+RAG here is **not** “retrieve chunks and stuff into the prompt.” It runs **after** the model emits a full sequence: it tries to **replace contiguous slices** of the model DNA with **registry or NCBI-derived** sequences when a slot is **verified**, and otherwise keeps **model DNA** for that slot.
 
-### 5.1 Index
+### 5.1 Why slot count matters (equal-chunk pitfall)
+
+Assembly maps the *i*-th parsed part to the *i*-th **equal fraction** of the model sequence. If the thought only names **two** parts (e.g. `B0034` and `B0015`) while the model actually encoded a **full circuit** (promoters, sensors, reporters), then **each “slot” is half the plasmid** — and substituting two short registry parts **replaces almost the entire construct**, destroying everything between them. **Mitigation in code:** (1) **broad part discovery** from the thought (see §5.4) so *N* matches the real part count; (2) server logs a **warning** when *N* ≤ 2 and the model sequence is very long; (3) **NCBI** can still supply real DNA for gene symbols missing from iGEM (§5.6).
+
+### 5.2 Index
 
 - **Corpus:** `igem_dataset.jsonl` (path override `DGENE_IGEM_JSONL`).
 - **Vector store:** Chroma persistent client (`DGENE_CHROMA_PATH`, default `.chroma_igem`).
 - **Embedding model:** `sentence-transformers` **`all-MiniLM-L6-v2`**, L2-normalized; collection metadata sets **`hnsw:space: cosine`**.
 - **Indexed document text:** concatenation of `part_name`, `part_type`, `short_desc` (not the raw DNA — DNA lives in metadata).
 - **First run:** `ensure_indexed()` loads JSONL in batches and writes embeddings if the collection is empty.
+- **Extending the corpus:** New lines in `igem_dataset.jsonl` are **not** visible to Chroma until the collection is rebuilt (delete the Chroma directory or point `DGENE_CHROMA_PATH` at a fresh path). The separate **registry token vocabulary** (§5.5) also keys off JSONL **mtime** for its cache.
 
-### 5.2 Retrieval
+### 5.3 Retrieval (per slot query)
 
 For each query string:
 
 1. **Exact path:** If the query contains **`BBa_…`**, Chroma `where={"part_name": …}` exact lookup (similarity 1.0).
-2. **Alias path:** Word-boundary aliases (e.g. `luxR` → `BBa_C0062`) also resolve to exact `part_name` lookup.
+2. **Alias path:** Word-boundary aliases (e.g. `luxR` → `BBa_C0062`, `b0034` → `BBa_K812053`) also resolve to exact `part_name` lookup (type filter relaxed for alias hits when needed).
 3. Else **semantic query:** embed the query string; optional **`part_type` filter** (Promoter / RBS / CDS / Terminator) to reduce cross-type confusion.
 
 Similarity is **`1 - distance`** in `[0, 1]`.
 
-### 5.3 Slot assembly (`apply_rag_substitution`)
+### 5.4 Part discovery — ordered `(type_hint, query_text)` list
 
-1. **Parse the model’s thought** into an ordered list of **(type_hint, query_text)** pairs:
-   - Preferred: **named parts** — regex scan for `BBa_*`, `J#####` promoters, `B####` parts, and a curated list (sfGFP, lacO, …) with **local context** used to attach type words (e.g. “B0034 RBS”).
-   - Fallback: **free-text lines** from sections like “Parts used” / bullet lists, with filters to drop prompt-skeleton garbage.
-2. If **no** queries extracted → return model sequence unchanged (with audit metadata).
-3. Split the **model sequence** into **N equal-ish contiguous chunks** (N = number of queries). Chunk *i* is the slot for query *i*.
-4. For each slot, **retrieve** the best part. If **similarity ≥ `DGENE_RAG_MIN_SIM`** (default **0.6**), **replace** that chunk with the **registry** sequence; otherwise **keep** the model slice.
-5. Concatenate slots → **final** sequence passed to passes / API.
+Thought text is scanned **in document order**. Multiple passes contribute **deduplicated gene names** (case-insensitive **first occurrence wins** for type hint):
 
-This design **never drops** a slot: weak matches keep model DNA so the construct length stays coherent at the cost of possible hallucinated bases in those slots.
+1. **Formal IDs:** `BBa_*`, `J#####`, `B####` (with **B0010–B0019 → Terminator**, **B0030–B0039 → RBS** priors when the prose does not spell out a type).
+2. **Curated synonyms:** Expanded `_GENERIC_PARTS` (chromoproteins e.g. `amilCP`, quorum proteins, common promoters) — maintained as human-readable shortcuts, not as a substitute for the full registry vocabulary.
+3. **Registry-derived vocabulary (`_ensure_registry_token_index`):** One pass over **`short_desc`** in the entire JSONL extracts gene-shaped tokens (`amilCP`, `mCherry`, `pBAD`, `LldR`, …), tallies **`part_type`**, filters **English / method stopwords** and **small-molecule inducers** (`IPTG`, `aTc`, `AHL`, …), and requires ≥ **2** occurrences. Result (~**3k+** symbols, typical build **~100 ms**) is cached in **`.chroma_igem/registry_tokens.json`** (versioned + JSONL **mtime**, same gitignored tree as Chroma).
+4. **CamelCase fallback:** Tokens like `PhzR` **not** in iGEM — matched with a conservative regex **only if** a part-type-ish keyword appears within ±60 characters (`promoter`, `expression`, `sensor`, …) and the token passes a short **blocklist** (`DNA`, restriction enzymes, boolean gate words, …).
 
-**Disable:** `DGENE_RAG=0` / `false`.
+**Type attachment (`_scan_window_for_type`):** Prefers the **text after** the symbol (standard iGEM prose: “B0034 **RBS**”). The **after-window** is truncated at the next **`BBa_` / `B####` / `J#####`** so “`amilCP` … **`B0034` RBS**” does not label `amilCP` as an RBS. A **narrow before-window** plus **sentence-boundary rejection** avoids stealing “promoter” / “terminator” from neighboring sentences. When the window is capped because another formal ID follows, **`max_offset`** on the type-keyword match prevents binding “**RBS**” in “… terminator **follows** the **RBS** **B0034**” to **B0015**.
+
+Fallback when **no** named parts match: **free-text-lines** extraction from headings / bullets (still drops prompt-skeleton echoes).
+
+### 5.5 Slot assembly (`apply_rag_substitution`)
+
+1. Build **queries** = ordered list **(type_hint, query_text)** (see §5.4).
+2. If **no** queries → return model sequence unchanged (with audit metadata).
+3. Split the **flattened uppercase** model sequence into **N** equal-ish contiguous **chunks** (N = len(queries)). Chunk *i* is the tentative DNA for slot *i*.
+4. **Per slot (in order):**
+   - **iGEM retrieval** as in §5.3. If **similarity ≥ `DGENE_RAG_MIN_SIM`** (default **0.6**) → slot DNA = **registry** sequence; **`sequence_source`** = `registry`; **`verified`** = true.
+   - Else → **§5.6 NCBI** when applicable (gene-shaped symbol, not `BBa_/B####/J#####`, not stripped as RBS/terminator-only slot).
+   - If NCBI succeeds → **`sequence_source`** = `ncbi`; **`verified`** = true; **`match_kind`** = `ncbi-gene`.
+   - Else → keep **model** chunk; **`sequence_source`** = `model`; **`verified`** = false (optionally **`reject_reason`** if a sub-threshold registry hit existed).
+5. Concatenate slot sequences → **final** DNA for passes / API.
+
+Slots are never **dropped**, but total length changes when substituted sequences differ in length from the original chunks.
+
+**Disable RAG entirely:** `DGENE_RAG=0` / `false`.
+
+### 5.6 NCBI Gene fallback — `ncbi_gene.py`
+
+When iGEM **does not verify** a slot, the compiler can fill **CDS-shaped** symbols from **NCBI Entrez** (bacterial locus / intronless assumption):
+
+1. **`esearch`** `db=gene` with **`{Symbol}[Gene Name] AND "{organism}"[Organism]`**.
+2. Organism **order**: prompt-aware heuristics (e.g. *Pyocyanin* / *Phz* mentions bump **Pseudomonas aeruginosa** first; *E. coli* bumps ***Escherichia coli*** first), overrideable via **`DGENE_NCBI_ORGANISMS`** (comma-separated scientific names).
+3. **`esummary`** Gene → **`genomicinfo`** `chraccver`, `chrstart`, `chrstop`.
+4. **`efetch`** `db=nuccore` genomic **FASTA** slice on the reported strand.
+
+**Caching:** Hits and explicit misses stored under **`.chroma_igem/ncbi_gene_cache.json`** so repeat compiles do not hammer NCBI.
+
+**Environment**
+
+| Variable | Purpose |
+|----------|---------|
+| `NCBI_API_KEY` or `DGENE_NCBI_API_KEY` | Optional; raises Entrez throughput (10 vs 3 req/s). Free at NCBI account settings. |
+| `DGENE_NCBI_EMAIL` | Recommended for polite-use policy |
+| `DGENE_NCBI` | Set `0` / `false` to disable fallback |
+| `DGENE_NCBI_ORGANISMS` | Comma-separated default search order |
+
+**Caveats:** Symbols absent or renamed in Gene (some community names like **`PhzI`** may need a manual JSONL row or synonym). Returned interval is **NCBI Gene’s genomic span** on the assembly — appropriate for bacterial ORFs in most hackathon demos, not a substitute for lab validation.
+
+### 5.7 API audit fields & UI (`server.py`, `web/`)
+
+- **`rag.parts[]`:** Each slot mirrors substitution outcome (`verified`, `sequence_source`, similarity, registry or NCBI metadata).
+- **`rag.map_slots[]`:** Human labels for the plasmid map; **`server.py` merges `verified`** and **`sequence_source`** from `rag.parts`** by aligned index after RAG runs.
+- **RAG card:** Summary counts **iGEM · NCBI Gene · model**; NCBI rows show organism and accession range.
+- **Plasmid map:** Features whose **`verified === false`** render a subtle **\* ** next to the label and a short note in the feature tooltip.
 
 ---
 
@@ -261,15 +312,15 @@ For each candidate, **`score_candidate`** maps pass metrics into four objectives
 - **`POST /api/compile`** with JSON `{ "prompt", "n", "progress"? }`:
   - **`progress: false`:** synchronous JSON result.
   - **`progress: true`:** `202` + `job_id`; client polls **`GET /api/compile/status?job_id=`** for `lines`, optional `streams`, then `result` when `done`.
-- **Pipeline** (`_compile`): `backend.generate` → per-candidate RAG → `run_passes` → `score_candidate` → `rank`.
+- **Pipeline** (`_compile`): `backend.generate` → per-candidate **`apply_rag_substitution`** (iGEM + NCBI inside `igem_rag`) → **`map_slots`** enriched with **`verified`** / **`sequence_source`** from **`rag.parts`** → `run_passes` → `score_candidate` → `rank`.
 - **`GET /api/health`:** model id / backend kind / GGUF filename for fine-tuned runs.
-- **Static** files from `web/` (HTML/CSS/JS plasmid renderer, candidate table, FASTA/GenBank download mirroring `app.py` logic in JS).
+- **Static** files from `web/` (HTML/CSS/JS circular plasmid map with restriction sites, hover tooltips, **unverified `*`** markers, candidate table / Pareto chart, FASTA/GenBank download mirroring `app.py` logic in JS).
 
 ---
 
 ## 9. Streamlit playground — `app.py`
 
-Single-shot flow: **form** → `run_inference` (one candidate) → `parse_thought_and_sequence` → `sanitize_thought_for_display` → `apply_rag_substitution` → `generate_interactive_plasmid_plot` (Bokeh + `dna_features_viewer` with **quarter-length** feature segments: promoter / RBS / CDS / terminator). Metrics (length, GC, Wallace Tm), FASTA/GenBank downloads, typewriter-style reasoning expander.
+Single-shot flow: **form** → `run_inference` (one candidate) → `parse_thought_and_sequence` → `sanitize_thought_for_display` → **`apply_rag_substitution`** (same iGEM → NCBI → model cascade as **`server.py`**) → `generate_interactive_plasmid_plot` (Bokeh + `dna_features_viewer` with **quarter-length** feature segments: promoter / RBS / CDS / terminator). Metrics (length, GC, Wallace Tm), FASTA/GenBank downloads, typewriter-style reasoning expander.
 
 ---
 
@@ -281,19 +332,22 @@ Single-shot flow: **form** → `run_inference` (one candidate) → `parse_though
 | `DGENE_GEMINI_MODEL` | e.g. `gemma-4-31b-it` |
 | `DGENE_GGUF_PATH` | Local GGUF |
 | `DGENE_INFERENCE` | `auto`, `gemini`, `gguf`, … |
-| `DGENE_IGEM_JSONL`, `DGENE_CHROMA_PATH`, `DGENE_RAG`, `DGENE_RAG_MIN_SIM` | RAG |
+| `DGENE_IGEM_JSONL`, `DGENE_CHROMA_PATH`, `DGENE_RAG`, `DGENE_RAG_MIN_SIM` | RAG (§5); Chroma persists under `DGENE_CHROMA_PATH`; registry token cache + NCBI cache live in that directory |
+| `NCBI_API_KEY` / `DGENE_NCBI_API_KEY`, `DGENE_NCBI_EMAIL`, `DGENE_NCBI`, `DGENE_NCBI_ORGANISMS` | NCBI Gene fallback (§5.6); key optional but recommended |
 | `DGENE_GEMINI_STREAM`, `DGENE_GEMINI_STREAM_EARLY_CLOSE`, `DGENE_GEMINI_PARALLEL`, `DGENE_GEMINI_MAX_WORKERS`, `DGENE_GEMINI_MAX_OUTPUT` | Hosted streaming, SSE early close, parallelism, pool size, per-candidate output token cap (default **8192**) |
 
 Stock **Gemini API** vs **fine-tuned GGUF:** `auto` prefers the API when keys are set; force local weights with `DGENE_INFERENCE=gguf` and `DGENE_GGUF_PATH` (details in §3c).
 
-`.env` is read on import without overriding existing environment variables.
+**.env loading:** `inference.py` reads repo-root **`.env`** on import (**does not override** variables already present in `os.environ`). **Restart** `python3 server.py` after editing `.env` so subprocess picks up `NCBI_API_KEY` and other additions.
 
 ---
 
 ## 11. Limitations and hackathon framing
 
 - **Outputs are not validated in the lab** — the stack is tooling / research; safety and wet-lab verification remain human responsibilities.
-- **RAG substitution** is similarity- and slot-based; misaligned part counts or model reasoning errors can still yield biological nonsense even when some slots are “verified.”
+- **RAG substitution** is **similarity- and slot-based** with **equal-length chunking**. Part discovery has been hardened (§5.4–5.5), but if the **model’s prose omits named parts**, slot count stays low and **chunk alignment is still ambiguous** — treat the **`*` markers** on the map and **`rag.parts`** audit as cues, not proofs of assembly architecture.
+- **iGEM corpus** covers ~30k parts in typical snapshots — not every biological name exists under the same symbol **`PhzI`**/`PhzR` as in papers; **NCBI** closes some gaps; **custom rows** in `igem_dataset.jsonl` remain valid demo extensions (remember **Chroma rebuild** §5.2).
+- **NCBI sequences** come from **Gene’s annotated genomic intervals** on a reference assembly — appropriate for bacterial demo builds, **not** a guarantee of Codon optimization, strain background, or wet-lab function.
 - **Passes** are heuristics (not a full Salis RBS calculator, not experimental throughput).
 - **Fine-tune recipe** (exact hyperparameters, merge, quantization command lines) is not versioned in this repo; the repo **does** ship **`generate_gemma_train.py`** and documents the **training objective** (§3). **Runtime** behavior is aligned so **stock Gemma 4 (API)** and **fine-tuned Gemma 4 (GGUF)** share the same parser and UI pipeline.
 
@@ -306,7 +360,9 @@ Stock **Gemini API** vs **fine-tuned GGUF:** `auto` prefers the API when keys ar
 | `igem_dataset.jsonl` | Registry-derived parts corpus (generated + committed or rebuilt) |
 | `gemma_train.jsonl` | Generated training JSONL (from `generate_gemma_train.py`) |
 | `xml_parts.xml.gz` | Input to `extract_igem_dataset.py` (user-supplied) |
-| `.chroma_igem/` | Persistent embedding index (gitignored pattern) |
+| `ncbi_gene.py` | NCBI Entrez client + on-disk cache for CDS fallback |
+| `.chroma_igem/` | Persistent embedding index (gitignored); may also contain `registry_tokens.json` and `ncbi_gene_cache.json` |
+| `web/` | Static compiler UI (plasmid map, RAG / Pareto / exports) |
 
 ---
 
