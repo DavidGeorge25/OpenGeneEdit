@@ -435,6 +435,19 @@ def _gemini_http_timeout_seconds() -> float:
     return 600.0
 
 
+def _gemini_max_output_tokens() -> int:
+    """``generationConfig.maxOutputTokens`` — override with ``DGENE_GEMINI_MAX_OUTPUT``."""
+
+    raw = os.environ.get("DGENE_GEMINI_MAX_OUTPUT", "").strip()
+    default = 32768
+    if not raw:
+        return default
+    try:
+        return max(256, min(1_048_576, int(raw)))
+    except ValueError:
+        return default
+
+
 def _gemini_env_bool(name: str, default: bool) -> bool:
     v = os.environ.get(name)
     if v is None or str(v).strip() == "":
@@ -835,7 +848,7 @@ def generate_text_gemma4(
         "maxOutputTokens": (
             max_output_tokens
             if max_output_tokens is not None
-            else int(os.environ.get("DGENE_GEMINI_MAX_OUTPUT", "8192"))
+            else _gemini_max_output_tokens()
         ),
     }
     _apply_optional_thinking_config(gen_cfg)
@@ -871,7 +884,7 @@ class GeminiBackend:
 
     def generate(self, prompt: str, n: int = 4) -> List[Candidate]:
         template = _gemini_prompt_template(prompt)
-        max_out = int(os.environ.get("DGENE_GEMINI_MAX_OUTPUT", "8192"))
+        max_out = _gemini_max_output_tokens()
         temps = [0.4, 0.55, 0.7, 0.85, 1.0, 1.1]
 
         def one(i: int) -> Candidate:

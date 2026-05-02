@@ -92,16 +92,29 @@ def _apply_rag_substitution(thought: str, sequence: str, *, candidate_id: str = 
 
     try:
         from igem_rag import apply_rag_substitution as rag_fn
+        from igem_rag import extract_part_map_slots
 
-        return rag_fn(
+        final_seq, rag_detail = rag_fn(
             thought,
             sequence,
             progress_cb=compile_progress,
             log_context=candidate_id,
         )
+        rag_detail = dict(rag_detail)
+        rag_detail["map_slots"] = extract_part_map_slots(thought)
+        return final_seq, rag_detail
     except Exception as exc:
         flat = "".join((sequence or "").upper().split())
-        return flat, {"enabled": False, "error": str(exc)}
+        try:
+            from igem_rag import extract_part_map_slots
+
+            return flat, {
+                "enabled": False,
+                "error": str(exc),
+                "map_slots": extract_part_map_slots(thought),
+            }
+        except Exception:
+            return flat, {"enabled": False, "error": str(exc)}
 
 
 def _compile(prompt: str, n: int = 4) -> dict:

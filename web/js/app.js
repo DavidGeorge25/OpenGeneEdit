@@ -182,17 +182,46 @@ function findRestrictionSites(sequence) {
   return sites;
 }
 
-/** Heuristic feature catalog: realistic SnapGene-style segments scaled to length.
- *  Replace this with model-emitted features when available. */
-function inferFeatures(L) {
-  const catalog = [
-    { label: "J23100",   sub: "promoter",   pStart: 0.00, pEnd: 0.16, strand: +1, color: "#22c55e" },
-    { label: "lacO",     sub: "operator",   pStart: 0.16, pEnd: 0.23, strand: +1, color: "#f59e0b" },
-    { label: "B0034",    sub: "RBS",        pStart: 0.23, pEnd: 0.29, strand: +1, color: "#a855f7" },
-    { label: "sfGFP",    sub: "CDS",        pStart: 0.29, pEnd: 0.86, strand: +1, color: "#0ea5e9" },
-    { label: "B0015",    sub: "terminator", pStart: 0.86, pEnd: 1.00, strand: -1, color: "#ef4444" },
-  ];
-  return catalog.map((f) => {
+/** Default heuristic ribbon when no parsed parts are available from the backend. */
+const DEFAULT_FEATURE_CATALOG = [
+  { label: "J23100", sub: "promoter", pStart: 0.0, pEnd: 0.16, strand: +1, color: "#22c55e" },
+  { label: "lacO", sub: "operator", pStart: 0.16, pEnd: 0.23, strand: +1, color: "#f59e0b" },
+  { label: "B0034", sub: "rbs", pStart: 0.23, pEnd: 0.29, strand: +1, color: "#a855f7" },
+  { label: "sfGFP", sub: "cds", pStart: 0.29, pEnd: 0.86, strand: +1, color: "#0ea5e9" },
+  { label: "B0015", sub: "terminator", pStart: 0.86, pEnd: 1.0, strand: -1, color: "#ef4444" },
+];
+
+const SUB_COLOR = {
+  promoter: "#22c55e",
+  operator: "#f59e0b",
+  rbs: "#a855f7",
+  cds: "#0ea5e9",
+  terminator: "#ef4444",
+  feature: "#64748b",
+};
+
+/** Feature arcs for the plasmid map: parsed ``map_slots`` from the model when present,
+ *  otherwise a generic catalog (historical demo layout). */
+function inferFeatures(L, mapSlots) {
+  const slots = Array.isArray(mapSlots) && mapSlots.length ? mapSlots : null;
+  if (slots) {
+    const n = slots.length;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const s = slots[i] || {};
+      const sub = String(s.sub || "feature").toLowerCase();
+      const label = String(s.label || "part").trim() || "part";
+      const pStart = i / n;
+      const pEnd = (i + 1) / n;
+      const strand = sub === "terminator" ? -1 : +1;
+      const color = SUB_COLOR[sub] || SUB_COLOR.feature;
+      const start = Math.max(1, Math.round(pStart * L) + (pStart === 0 ? 0 : 1));
+      const end = Math.max(start + 1, Math.round(pEnd * L));
+      out.push({ label, sub, pStart, pEnd, strand, color, start, end });
+    }
+    return out;
+  }
+  return DEFAULT_FEATURE_CATALOG.map((f) => {
     const start = Math.max(1, Math.round(f.pStart * L) + (f.pStart === 0 ? 0 : 1));
     const end = Math.max(start + 1, Math.round(f.pEnd * L));
     return { ...f, start, end };
@@ -285,6 +314,13 @@ function moveTooltipAt(tip, frame, ev) {
   tip.style.top = `${ev.clientY - rect.top + 12}px`;
 }
 
+function humanizeFeatureSub(sub) {
+  const s = String(sub || "feature").toLowerCase();
+  if (s === "rbs") return "RBS";
+  if (s === "cds") return "CDS";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function renderFeaturesAndLabels(features, L, tip, frame) {
   const arcs = $("plasmidRotate");
   const labels = $("plasmidLabels");
@@ -333,14 +369,15 @@ function renderFeaturesAndLabels(features, L, tip, frame) {
       "text-anchor": anchor,
       class: "plasmid-feature-sub",
     });
-    tSub.textContent = `${f.sub} · ${f.start}–${f.end}`;
+    const subHuman = humanizeFeatureSub(f.sub);
+    tSub.textContent = `${subHuman} · ${f.start}–${f.end}`;
     labels.appendChild(tSub);
 
     const onEnter = (ev) => {
       document.querySelectorAll(".plasmid-seg.is-active").forEach((el) => el.classList.remove("is-active"));
       path.classList.add("is-active");
       tip.hidden = false;
-      tip.innerHTML = `<strong>${f.label}</strong> · ${f.sub}<br/>${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand`;
+      tip.innerHTML = `<strong>${f.label}</strong> · ${subHuman}<br/>${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand`;
       moveTooltipAt(tip, frame, ev);
     };
     path.addEventListener("mouseenter", onEnter);
@@ -352,7 +389,7 @@ function renderFeaturesAndLabels(features, L, tip, frame) {
   }
 }
 
-function renderPlasmid(sequence, name = "construct") {
+function renderPlasmid(sequence, name = "construct", mapSlots = null) {
   const tip = $("featureTooltip");
   const frame = $("vizFrame");
   const bpEl = $("bpLabel");
@@ -370,7 +407,7 @@ function renderPlasmid(sequence, name = "construct") {
   }
   bpEl.textContent = `${L} bp`;
 
-  const features = inferFeatures(L);
+  const features = inferFeatures(L, mapSlots);
   const sites = findRestrictionSites(sequence);
 
   renderTicks(L);
@@ -648,7 +685,7 @@ function renderRagPanel(rag) {
   card.hidden = false;
   const minS = rag.min_similarity != null ? rag.min_similarity : 0.6;
   const verified = parts.filter((p) => p.verified).length;
-  summary.textContent = `${verified}/${parts.length} parts matched iGEM at similarity ≥ ${minS}. Unverified slots keep model-derived DNA slices.`;
+  summary.textContent = `${verified}/${parts.length} parts substituted from iGEM at similarity ≥ ${minS}. Other slots keep model DNA (including below-threshold hits).`;
 
   list.innerHTML = "";
   for (const p of parts) {
@@ -656,9 +693,13 @@ function renderRagPanel(rag) {
     li.className = p.verified ? "is-verified" : "is-unverified";
     const title = document.createElement("div");
     title.className = "rag-part-title";
-    title.textContent = p.verified
-      ? `${p.part_name || "—"} · ${p.part_type || ""}`
-      : "Unverified (below threshold)";
+    if (p.verified) {
+      title.textContent = `${p.part_name || "—"} · ${p.part_type || ""}`;
+    } else if (p.part_name) {
+      title.textContent = `${p.part_name} · model DNA kept (${p.reject_reason === "below_similarity_threshold" ? "below threshold" : "no verified hit"})`;
+    } else {
+      title.textContent = "Model DNA kept (no verified registry hit)";
+    }
     const meta = document.createElement("span");
     meta.className = "rag-part-meta";
     const sim =
@@ -1129,7 +1170,8 @@ function selectCandidate(id, { animatePasses = false } = {}) {
   // Plasmid map + sequence + metrics tied to selected candidate.
   const seq = cleanSeq(cand.sequence);
   lastSequence = seq;
-  renderPlasmid(seq, cand.strategy || "compiled_construct");
+  const mapSlots = cand.rag && Array.isArray(cand.rag.map_slots) ? cand.rag.map_slots : null;
+  renderPlasmid(seq, cand.strategy || "compiled_construct", mapSlots);
   $("mLen").textContent = `${seq.length} bp`;
   $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
   const cai = passMetricFor(cand.passes, "cai");
@@ -1226,7 +1268,8 @@ async function compile() {
     // Wire up everything for the BEST candidate first; reveal as we go.
     const seq = cleanSeq(best.sequence);
     lastSequence = seq;
-    renderPlasmid(seq, best.strategy || "compiled_construct");
+    const mapSlots = best.rag && Array.isArray(best.rag.map_slots) ? best.rag.map_slots : null;
+    renderPlasmid(seq, best.strategy || "compiled_construct", mapSlots);
     $("mLen").textContent = `${seq.length} bp`;
     $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
     const cai = passMetricFor(best.passes, "cai");

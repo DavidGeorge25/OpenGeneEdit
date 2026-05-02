@@ -8,7 +8,8 @@ Environment:
   • ``DGENE_IGEM_JSONL`` — override path to JSONL (default: beside this package).
   • ``DGENE_CHROMA_PATH`` — persistent Chroma directory (default: ``.chroma_igem``).
   • ``DGENE_RAG`` — set ``0`` / ``false`` to disable substitution in the compile pipeline.
-  • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to substitute (default ``0.6``).
+  • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to **substitute** registry DNA for a
+    slot (default ``0.6``). Below threshold the model's DNA slice for that slot is kept.
 
 Logging (stderr): set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` to print retrieval queries,
 hit lists with similarity scores, and whether registry sequences replaced model DNA.
@@ -533,17 +534,20 @@ def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
     return found
 
 
-def extract_part_queries(thought: str) -> List[Tuple[Optional[str], str]]:
+def extract_part_queries(thought: str) -> Tuple[List[Tuple[Optional[str], str]], str]:
     """Build (type_hint, query_text) pairs for RAG retrieval.
 
     Prefers explicit part identifiers (``BBa_*``, ``J#####``, ``B####``, ``sfGFP``,
     ``lacO``, …) so the registry sees crisp queries. Falls back to per-line extraction
     when no canonical names are present, with prompt-skeleton echoes filtered out.
+
+    Returns ``(queries, parsing_strategy)`` where ``parsing_strategy`` is
+    ``\"named-parts\"`` or ``\"free-text-lines\"``.
     """
 
     named = extract_part_names(thought)
     if named:
-        return named
+        return named, "named-parts"
 
     out: List[Tuple[Optional[str], str]] = []
     for line in extract_part_descriptions(thought):
@@ -560,7 +564,53 @@ def extract_part_queries(thought: str) -> List[Tuple[Optional[str], str]]:
             type_hint = None
             query_text = line.strip()
         out.append((type_hint, query_text))
-    return out
+    return out, "free-text-lines"
+
+
+def _part_display_label(type_hint: Optional[str], query_text: str) -> str:
+    """Short label for UI (plasmid map) — strip trailing type word from enriched queries."""
+
+    q = (query_text or "").strip()
+    if not q:
+        return "part"
+    th = (type_hint or "").strip()
+    if th:
+        suffix = f" {th}"
+        if len(q) > len(suffix) and q.endswith(suffix):
+            core = q[: -len(suffix)].strip()
+            if core:
+                return core
+    return q if len(q) <= 36 else q[:33] + "…"
+
+
+def _part_map_subcategory(type_hint: Optional[str], query_text: str) -> str:
+    """Normalize feature class for map coloring (matches inferFeatures ``sub`` semantics)."""
+
+    th = (type_hint or "").strip().lower()
+    if th in ("promoter", "rbs", "cds", "terminator"):
+        return th
+    qlow = (query_text or "").lower()
+    if "operator" in qlow:
+        return "operator"
+    head = qlow.split()[0] if qlow.split() else ""
+    if head in ("laco", "teto"):
+        return "operator"
+    return "feature"
+
+
+def extract_part_map_slots(thought: str) -> List[Dict[str, str]]:
+    """Ordered part labels for the circular map — same discovery order as :func:`extract_part_queries`."""
+
+    queries, _strategy = extract_part_queries(thought)
+    slots: List[Dict[str, str]] = []
+    for type_hint, query_text in queries:
+        slots.append(
+            {
+                "label": _part_display_label(type_hint, query_text),
+                "sub": _part_map_subcategory(type_hint, query_text),
+            }
+        )
+    return slots
 
 
 def _split_sequence_chunks(seq: str, n: int) -> List[str]:
@@ -588,10 +638,11 @@ def apply_rag_substitution(
     progress_cb: Optional[Any] = None,
     log_context: str = "",
 ) -> Tuple[str, Dict[str, Any]]:
-    """Replace model DNA with concatenated iGEM sequences where similarity is high enough.
+    """Merge registry DNA only when retrieval similarity ≥ :func:`min_similarity`.
 
-    For descriptions below the similarity threshold, keeps the corresponding
-    slice of the **model** sequence (equal-length contiguous chunks).
+    Each parsed part maps to one contiguous slice of the model sequence (equal-length
+    chunks). Registry substitution applies **only** to verified hits; otherwise that
+    slot keeps the model-derived DNA so no part is dropped from the construct.
 
     Returns ``(final_sequence, rag_detail_dict)``.
     """
@@ -616,10 +667,10 @@ def apply_rag_substitution(
         return seq, {"enabled": False, "error": str(exc)}
 
     seq_clean = "".join((model_sequence or "").upper().split())
-    queries = extract_part_queries(thought)
+    queries, parsing_strategy = extract_part_queries(thought)
     rag_always_log(
         f"{ctx}: extracted {len(queries)} part query(ies) from thought "
-        f"(strategy={'named-parts' if extract_part_names(thought) else 'free-text-lines'})"
+        f"(strategy={parsing_strategy!r})"
     )
     for qi, (type_hint, query_text) in enumerate(queries):
         rag_always_log(
@@ -636,6 +687,14 @@ def apply_rag_substitution(
             "applied": False,
             "reason": "no_part_descriptions_in_thought",
             "parts": [],
+            "assembly_audit": {
+                "parsing_strategy": parsing_strategy,
+                "identified_queries": [],
+                "slot_count": 0,
+                "slots_in_final_sequence": [],
+                "final_sequence_bp": len(seq_clean),
+                "parsed_vs_assembled_slot_match": True,
+            },
         }
 
     thr = min_similarity()
@@ -646,6 +705,7 @@ def apply_rag_substitution(
     retrieve_k = max(1, min(10, 5 if rag_debug_enabled() else 1))
 
     for i, (type_hint, query_text) in enumerate(queries):
+        model_slice = chunks[i] if i < len(chunks) else ""
         hits = retrieve_parts(query_text, part_type_filter=type_hint, top_k=retrieve_k)
         best = hits[0] if hits else None
         sim = best.similarity if best else 0.0
@@ -654,10 +714,9 @@ def apply_rag_substitution(
             rag_always_log(
                 f"RAG result: <none> — registry returned no hits for {query_text!r}"
             )
-            fallback = chunks[i] if i < len(chunks) else ""
-            merged.append(fallback)
+            merged.append(model_slice)
             rag_always_log(
-                f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(fallback)} "
+                f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(model_slice)} "
                 f"(no registry hits at all — sequence may be hallucinated)"
             )
             parts_out.append(
@@ -670,51 +729,97 @@ def apply_rag_substitution(
                     "substituted": False,
                     "similarity": None,
                     "best_candidate": None,
-                    "sequence": fallback,
+                    "sequence_source": "model",
+                    "sequence": model_slice,
                 }
             )
             continue
 
         verified = sim >= thr
-        verdict = "VERIFIED" if verified else "unverified-but-substituted"
+        registry_seq = "".join(best.sequence.upper().split())
         rag_always_log(
             f"RAG result: {best.part_id} ({best.part_name}, type={best.part_type}) "
-            f"similarity={sim:.4f} verdict={verdict}"
+            f"similarity={sim:.4f} threshold={thr:.4f} verified={verified}"
         )
 
-        registry_seq = "".join(best.sequence.upper().split())
-        merged.append(registry_seq)
         if verified:
+            merged.append(registry_seq)
             rag_always_log(
-                f"{ctx}: slot[{i}] SUBSTITUTED bp={len(registry_seq)} "
-                f"sim={sim:.4f} (≥ {thr:.4f}) part={best.part_name!r} id={best.part_id!r} VERIFIED"
+                f"{ctx}: slot[{i}] SUBSTITUTED registry bp={len(registry_seq)} "
+                f"sim={sim:.4f} (≥ {thr:.4f}) part={best.part_name!r} id={best.part_id!r}"
+            )
+            parts_out.append(
+                {
+                    "query": query_text,
+                    "retrieval_query": query_text,
+                    "part_type_filter": type_hint,
+                    "verified": True,
+                    "unverified": False,
+                    "substituted": True,
+                    "similarity": round(sim, 4),
+                    "part_id": best.part_id,
+                    "part_name": best.part_name,
+                    "part_type": best.part_type,
+                    "short_desc": best.short_desc,
+                    "sequence_source": "registry",
+                    "sequence": registry_seq,
+                }
             )
         else:
+            merged.append(model_slice)
             rag_always_log(
-                f"{ctx}: slot[{i}] SUBSTITUTED bp={len(registry_seq)} "
-                f"sim={sim:.4f} (< {thr:.4f}) part={best.part_name!r} id={best.part_id!r} "
-                "unverified — registry DNA preferred over hallucinated model slice"
+                f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(model_slice)} "
+                f"best_hit={best.part_id!r} sim={sim:.4f} (< {thr:.4f}) — "
+                "below threshold; registry sequence not used"
             )
-        parts_out.append(
-            {
-                "query": query_text,
-                "retrieval_query": query_text,
-                "part_type_filter": type_hint,
-                "verified": verified,
-                "unverified": not verified,
-                "substituted": True,
-                "similarity": round(sim, 4),
-                "part_id": best.part_id,
-                "part_name": best.part_name,
-                "part_type": best.part_type,
-                "short_desc": best.short_desc,
-                "sequence": registry_seq,
-            }
-        )
+            parts_out.append(
+                {
+                    "query": query_text,
+                    "retrieval_query": query_text,
+                    "part_type_filter": type_hint,
+                    "verified": False,
+                    "unverified": True,
+                    "substituted": False,
+                    "similarity": round(sim, 4),
+                    "part_id": best.part_id,
+                    "part_name": best.part_name,
+                    "part_type": best.part_type,
+                    "short_desc": best.short_desc,
+                    "sequence_source": "model",
+                    "reject_reason": "below_similarity_threshold",
+                    "registry_candidate_bp": len(registry_seq),
+                    "sequence": model_slice,
+                }
+            )
 
     final = "".join(merged)
     verified_count = sum(1 for p in parts_out if p.get("verified"))
     sequence_changed = final != seq_clean
+
+    slot_audit: List[Dict[str, Any]] = []
+    for i, p in enumerate(parts_out):
+        seq_bp = len(p.get("sequence") or "")
+        src = p.get("sequence_source") or ("registry" if p.get("substituted") else "model")
+        slot_audit.append(
+            {
+                "slot_index": i,
+                "query": p.get("query"),
+                "sequence_bp": seq_bp,
+                "sequence_source": src,
+                "verified": bool(p.get("verified")),
+                "substituted": bool(p.get("substituted")),
+            }
+        )
+        rag_always_log(
+            f"{ctx}: assembly_audit slot[{i}] query={p.get('query')!r} "
+            f"bp={seq_bp} source={src} substituted={bool(p.get('substituted'))}"
+        )
+    rag_always_log(
+        f"{ctx}: assembly_audit summary parsing_strategy={parsing_strategy!r} "
+        f"identified_slots={len(queries)} assembled_slots={len(parts_out)} "
+        f"final_bp={len(final)} parsed_vs_assembled_match={len(queries) == len(parts_out)}"
+    )
+
     rag_debug_log(
         f"{ctx}: substitution summary — threshold={thr:.3f} verified_parts={verified_count}/"
         f"{len(parts_out)} model_bp={len(seq_clean)} final_bp={len(final)} "
@@ -731,4 +836,12 @@ def apply_rag_substitution(
         "final_sequence_bp": len(final),
         "verified_part_count": verified_count,
         "sequence_changed_from_model": sequence_changed,
+        "assembly_audit": {
+            "parsing_strategy": parsing_strategy,
+            "identified_queries": [q for (_, q) in queries],
+            "slot_count": len(queries),
+            "slots_in_final_sequence": slot_audit,
+            "final_sequence_bp": len(final),
+            "parsed_vs_assembled_slot_match": len(queries) == len(parts_out),
+        },
     }
