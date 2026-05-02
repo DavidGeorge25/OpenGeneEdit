@@ -26,6 +26,9 @@ This process uses ``ThreadingHTTPServer`` so a long-running ``/api/compile``
 ``202`` and ``{"job_id": "..."}``. Poll ``GET /api/compile/status?job_id=...``
 until ``done``; each response includes a growing ``lines`` trace from Gemma,
 passes, and ranking.
+
+**stderr:** High-frequency poll requests are hidden from the default access log (see ``DGENE_HTTP_LOG`` in ``.env.example``).
+Async jobs always print ``[dgene/server] job <id> · …`` when the worker starts, finishes, or fails.
 """
 from __future__ import annotations
 
@@ -216,6 +219,26 @@ def _job_set_stream(job_id: str, stream_id: str, text: str) -> None:
         job.setdefault("streams", {})[stream_id] = text
 
 
+def _server_debug(msg: str) -> None:
+    """Verbose compile/job tracing when DGENE_SERVER_DEBUG is set."""
+    if (os.environ.get("DGENE_SERVER_DEBUG") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    ts = time.strftime("%H:%M:%S")
+    sys.stderr.write(f"[dgene/server {ts}] {msg}\n")
+    sys.stderr.flush()
+
+
+def _job_lifecycle(job_id: str, msg: str) -> None:
+    """Always-on high-signal line so long jobs and failures are visible in the terminal."""
+    sys.stderr.write(f"[dgene/server] job {job_id} · {msg}\n")
+    sys.stderr.flush()
+
+
 def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
     def push(msg: str) -> None:
         _job_append_line(job_id, f"{time.strftime('%H:%M:%S')}  {msg}")
@@ -225,6 +248,7 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
 
     set_compile_progress_hook(push)
     set_compile_stream_hook(push_stream)
+    t_job = time.perf_counter()
     try:
         try:
             from igem_rag import set_rag_debug_mirror
@@ -237,19 +261,41 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
         except ImportError:
             pass
         push("job · started")
+        _job_lifecycle(job_id, "thread started (async compile)")
+        _server_debug(
+            f"job {job_id} prompt_len={len(prompt)} n={n} — entering inference+RAG+passes"
+        )
         result = _compile(prompt, n=n)
+        elapsed = time.perf_counter() - t_job
+        nc = len(result.get("candidates") or [])
+        _job_lifecycle(
+            job_id,
+            f"OK · {elapsed:.1f}s · {nc} candidate(s) — poll will return result",
+        )
+        _server_debug(
+            f"job {job_id} _compile returned in {elapsed:.1f}s best_id={result.get('best_id')!r}"
+        )
         with _JOBS_LOCK:
             job = _COMPILE_JOBS.get(job_id)
             if job:
                 job["result"] = result
                 job["done"] = True
+            else:
+                _job_lifecycle(job_id, "WARN: job dict missing after compile (race?)")
     except Exception as exc:
+        elapsed = time.perf_counter() - t_job
+        _job_lifecycle(
+            job_id,
+            f"FAILED after {elapsed:.1f}s · {type(exc).__name__}: {exc}",
+        )
         traceback.print_exc(file=sys.stderr)
         with _JOBS_LOCK:
             job = _COMPILE_JOBS.get(job_id)
             if job:
                 job["error"] = str(exc)
                 job["done"] = True
+            else:
+                _job_lifecycle(job_id, "WARN: job dict missing; error not stored in job")
     finally:
         set_compile_progress_hook(None)
         set_compile_stream_hook(None)
@@ -270,13 +316,15 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "DGeneCompiler/2.0"
 
     def log_message(self, format: str, *args) -> None:
-        """Hide noisy poll spam so stderr stays readable (e.g. RAG ``[dgene/rag]`` lines)."""
+        """Suppress poll/health spam; set DGENE_HTTP_LOG=all to log every request."""
         try:
             rendered = format % args if args else format
         except Exception:
             rendered = str(format)
-        if "/api/compile/status" in rendered or "/api/health" in rendered:
-            return
+        mode = (os.environ.get("DGENE_HTTP_LOG") or "").strip().lower()
+        if mode not in ("all", "verbose", "1", "true", "yes"):
+            if "/api/compile/status" in rendered or "/api/health" in rendered:
+                return
         super().log_message(format, *args)
 
     def _write_body(self, body: bytes) -> None:
@@ -399,9 +447,6 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         self._write_body(data)
-
-    def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write(f"{self.address_string()} — {fmt % args}\n")
 
 
 # ---------------------------------------------------------------------------

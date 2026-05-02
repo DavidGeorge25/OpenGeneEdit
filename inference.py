@@ -198,19 +198,51 @@ def _min_parse_dna_length() -> int:
 
 
 def _extract_dna_after_marker(rest: str, *, min_len: int) -> str:
-    """Take the longest DNA substring after `<channel|>`; allows trailing prose."""
+    """DNA after `<channel|>`: concatenate all ACGT runs in order (handles spaced DNA).
+
+    Prefer text before ``</circuit>`` so checklist prose after the tag is ignored.
+    """
     if not rest or not rest.strip():
         return ""
-    flat = re.sub(r"\s+", "", rest)
-    best = ""
-    for m in re.finditer(r"[ACGTNacgtn]+", flat):
-        seg = m.group(0).upper()
-        if len(seg) >= min_len and len(seg) > len(best):
-            best = seg
-    if len(best) >= min_len:
-        return best
+    low = rest.lower()
+    term = low.find("</circuit>")
+    if term >= 0:
+        rest = rest[:term]
+    chunks = re.findall(r"[ACGTNacgtn]+", rest)
+    joined = "".join(seg.upper() for seg in chunks)
+    if len(joined) >= min_len:
+        return joined
     letters = "".join(c for c in rest.upper() if c in "ACGTN")
     return letters if len(letters) >= min_len else ""
+
+
+def _clip_tail_before_next_channel_open(tail: str) -> str:
+    """If the model starts another thought block in the DNA tail, ignore that suffix."""
+
+    m = _CHANNEL_OPEN_RE.search(tail)
+    if m:
+        return tail[: m.start()].strip()
+    return tail
+
+
+def _try_parse_channel_block(raw: str, min_dna: int) -> Optional[Tuple[str, str]]:
+    """Parse one reply that begins at ``<|channel>thought`` (possibly variant spelling)."""
+
+    mo = _CHANNEL_OPEN_RE.match(raw)
+    if not mo:
+        return None
+    after_open = raw[mo.end() :]
+    mc = _CHANNEL_CLOSE_RE.search(after_open)
+    if not mc:
+        return None
+    thought = after_open[: mc.start()].strip()
+    tail = after_open[mc.end() :].strip()
+    tail = _clip_tail_before_next_channel_open(tail)
+    tail = _strip_trailing_stop_markers(tail)
+    sequence = _extract_dna_after_marker(tail, min_len=min_dna)
+    if thought and sequence:
+        return thought, sequence
+    return None
 
 
 def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
@@ -223,29 +255,30 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
         <channel|>
         DNA...
 
-    Tolerates leading preamble, markdown fences, ``<|channel|>thought`` typos,
-    optional ``</circuit>`` / fences after DNA, and non-DNA text after the sequence.
+    Tolerates long preamble / planning: if ``<|channel>thought`` appears more than once
+    (model often emits a valid block after rambling), the **last** complete block wins. Concatenates spaced DNA
+    segments into one string. Truncates extraction at ``</circuit>`` when present.
     """
     raw_in = (model_output or "").strip()
     raw_in = _strip_markdown_fences(raw_in)
+    min_dna = _min_parse_dna_length()
+
+    # Prefer the last well-formed block — models often stream bullets then a final answer.
+    for mo in reversed(list(_CHANNEL_OPEN_RE.finditer(raw_in))):
+        got = _try_parse_channel_block(raw_in[mo.start() :], min_dna)
+        if got:
+            return got
+
+    # Legacy: trim to first open (old behavior for single-block outputs).
     mo_skip = _CHANNEL_OPEN_RE.search(raw_in)
     if mo_skip:
         raw_in = raw_in[mo_skip.start() :]
 
     raw = _strip_trailing_stop_markers(raw_in)
     raw = _strip_markdown_fences(raw)
-    min_dna = _min_parse_dna_length()
-
-    mo = _CHANNEL_OPEN_RE.search(raw)
-    if mo:
-        after_open = raw[mo.end() :]
-        mc = _CHANNEL_CLOSE_RE.search(after_open)
-        if mc:
-            thought = after_open[: mc.start()].strip()
-            tail = _strip_trailing_stop_markers(after_open[mc.end() :].strip())
-            sequence = _extract_dna_after_marker(tail, min_len=min_dna)
-            if thought and sequence:
-                return thought, sequence
+    got2 = _try_parse_channel_block(raw, min_dna)
+    if got2:
+        return got2
 
     for pat in (
         re.compile(
@@ -261,7 +294,8 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
         match = pat.search(raw)
         if match:
             thought = match.group(1).strip()
-            tail = _strip_trailing_stop_markers(raw[match.end() :].strip())
+            tail = _clip_tail_before_next_channel_open(raw[match.end() :].strip())
+            tail = _strip_trailing_stop_markers(tail)
             sequence = _extract_dna_after_marker(tail, min_len=min_dna)
             if thought and sequence:
                 return thought, sequence
@@ -280,7 +314,8 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
     mc2 = _CHANNEL_CLOSE_RE.search(raw)
     if mc2:
         head = raw[: mc2.start()]
-        tail = _strip_trailing_stop_markers(raw[mc2.end() :].strip())
+        tail = _clip_tail_before_next_channel_open(raw[mc2.end() :].strip())
+        tail = _strip_trailing_stop_markers(tail)
         thought = _CHANNEL_OPEN_RE.sub("", head, count=1).strip()
         sequence = _extract_dna_after_marker(tail, min_len=min_dna)
         if thought and sequence:
@@ -289,8 +324,9 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
     if "<|channel>thought" in raw and "<channel|>" in raw:
         thought_part, seq_part = raw.split("<channel|>", 1)
         thought = thought_part.replace("<|channel>thought", "", 1).strip()
+        seq_part = _clip_tail_before_next_channel_open(seq_part.strip())
         sequence = _extract_dna_after_marker(
-            _strip_trailing_stop_markers(seq_part.strip()), min_len=min_dna
+            _strip_trailing_stop_markers(seq_part), min_len=min_dna
         )
         if thought and sequence:
             return thought, sequence
@@ -299,11 +335,13 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
 
 
 _FORMAT_RETRY_SUFFIX = (
-    "\n\n**Format correction (required):** Your reply must start with `<|channel>thought` "
-    "as the very first characters—no title, no markdown fence, no preamble. "
-    "End reasoning with `<channel|>` on its own line. "
-    "After that line output only A/C/G/T nucleotides (≥12 bp). "
-    "Then one more line containing exactly `</circuit>`. No triple backticks anywhere."
+    "\n\n**Format correction (required):** Your entire reply must be ONLY these four lines "
+    "(plus optional single blank line after the thought paragraph): "
+    "`<|channel>thought` → one short paragraph → `<channel|>` → one DNA line → `</circuit>`. "
+    "Delete any bullets (`*`, `-`, numbered lists), checklists, and planning text. "
+    "The first character of the reply must be `<`. "
+    "The DNA line must have zero spaces inside it. "
+    "You must print `</circuit>` on its own line or generation will not stop."
 )
 
 _FORMAT_RETRY_STRICT = (
@@ -342,13 +380,13 @@ _GEMINI_API_BASE = (
 _GEMINI_STOP_SEQUENCES = ["</circuit>"]
 
 _GEMINI_SYSTEM_STOP_INSTRUCTION = (
-    "You are the DGene DNA compiler. Your reply must begin with the literal text "
-    "<|channel>thought (no preamble, no greeting, no markdown fence). After one short "
-    "paragraph of design reasoning that names the chosen promoter / RBS / CDS / terminator, "
-    "emit <channel|> on its own line, then a single continuous DNA string using ONLY the "
-    "letters A, C, G, T (uppercase, ≥12 nt, no spaces, no line breaks, no FASTA header), "
-    "then </circuit> on its own line and stop. Do not output triple backticks, code fences, "
-    "JSON, or YAML anywhere."
+    "You are the DGene DNA compiler. The complete reply is ONLY: the literal first line "
+    "<|channel>thought, then one short paragraph (no bullets, no * or - list markers, no "
+    "\"Wait,\" self-dialogue, no checklists), then a line <channel|>, then ONE line of "
+    "DNA using only A/C/G/T with NO spaces inside that line, then a line </circuit> and "
+    "nothing after. First character must be `<`. Naming iGEM ids (J23100, B0034, BBa_…) "
+    "belongs only inside the paragraph. Never output \"simulated\" or fragmentary cds; "
+    "emit a continuous sequence. Do not use triple backticks or code fences."
 )
 
 # Verbatim schema we show in prompts AND echo on parse failures so users can see exactly what
@@ -402,8 +440,13 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "the closing angle bracket.\n"
         "3. The DNA line must be one continuous string of A, C, G, T (uppercase, ≥12 nt). "
         "No spaces, no line breaks inside the DNA, no numbering, no FASTA `>` line.\n"
-        "4. End with </circuit> on its own line and stop.\n"
+        "4. End with </circuit> on its own line and stop immediately after that.\n"
         "5. Never output triple backticks anywhere in the reply.\n"
+        "6. Do not stall with outlines, self-corrections, or \"since I cannot fit…\" essays. "
+        "Finish the thought paragraph, then output the DNA and </circuit> within a single reply.\n"
+        "7. Never use markdown bullets (`*`, `-`, numbered lists) or nested indentation — "
+        "only plain sentences in the thought paragraph.\n"
+        "8. The DNA line is a single token run: no space characters anywhere in it.\n"
     )
 
 
@@ -439,7 +482,9 @@ def _gemini_max_output_tokens() -> int:
     """``generationConfig.maxOutputTokens`` — override with ``DGENE_GEMINI_MAX_OUTPUT``."""
 
     raw = os.environ.get("DGENE_GEMINI_MAX_OUTPUT", "").strip()
-    default = 32768
+    # 32k encourages endless bullet-planning without emitting </circuit>; compile needs
+    # ~1–20k bp DNA + short reasoning. Override with DGENE_GEMINI_MAX_OUTPUT for huge designs.
+    default = 16384
     if not raw:
         return default
     try:
@@ -681,6 +726,33 @@ def _gemini_stream_collect(
         )
     t0 = time.perf_counter()
     accumulated = ""
+    hb_sec_raw = os.environ.get("DGENE_GEMINI_HTTP_HEARTBEAT_SEC", "15").strip()
+    try:
+        hb_interval = float(hb_sec_raw)
+    except ValueError:
+        hb_interval = 15.0
+    stop_heartbeat = threading.Event()
+    label = (debug_ctx or "stream").strip()
+
+    def _stream_heartbeat() -> None:
+        if hb_interval <= 0:
+            return
+        n = 0
+        while not stop_heartbeat.wait(timeout=hb_interval):
+            n += 1
+            elapsed = time.perf_counter() - t0
+            compile_progress(
+                f"gemma · {label} · SSE streaming… {elapsed:.0f}s · "
+                f"{len(accumulated)} chars · pulse {n} (cap {timeout:.0f}s)"
+            )
+
+    hb_thread = (
+        threading.Thread(target=_stream_heartbeat, daemon=True)
+        if hb_interval > 0
+        else None
+    )
+    if hb_thread is not None:
+        hb_thread.start()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             line_buf = b""
@@ -730,6 +802,8 @@ def _gemini_stream_collect(
                 pass
         infer_debug_log(f"{tag}stream HTTP {exc.code} after {elapsed_ms:.0f}ms — {msg[:400]}")
         raise RuntimeError(f"Gemini stream HTTP {exc.code}: {msg}") from None
+    finally:
+        stop_heartbeat.set()
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     infer_debug_log(
@@ -891,7 +965,7 @@ class GeminiBackend:
             ctx = f"cand_{i}"
             temperature = temps[i % len(temps)]
             compile_progress(
-                f"gemma · candidate {i + 1}/{n} · generateContent · T={temperature:g} · "
+                f"gemma · candidate {i + 1}/{n} · API · T={temperature:g} · "
                 f"model={self.model_id!r}"
             )
             infer_debug_log(
@@ -962,9 +1036,10 @@ class GeminiBackend:
             return [one(i) for i in range(n)]
 
         try:
-            max_workers = int(os.environ.get("DGENE_GEMINI_MAX_WORKERS", "4").strip() or "4")
+            # Fewer concurrent streams reduces 429 / flaky TLS when four connections open at once.
+            max_workers = int(os.environ.get("DGENE_GEMINI_MAX_WORKERS", "2").strip() or "2")
         except ValueError:
-            max_workers = 4
+            max_workers = 2
         max_workers = max(1, min(max_workers, n))
         infer_debug_log(f"ThreadPoolExecutor max_workers={max_workers}")
         g0 = time.perf_counter()

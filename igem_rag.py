@@ -11,8 +11,13 @@ Environment:
   • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to **substitute** registry DNA for a
     slot (default ``0.6``). Below threshold the model's DNA slice for that slot is kept.
 
-Logging (stderr): set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` to print retrieval queries,
-hit lists with similarity scores, and whether registry sequences replaced model DNA.
+Logging (stderr): Every compile prints chroma query strings, ``ALIAS HIT:`` lines for the
+alias table, per-slot hits (part_name, sim, bp), and sequence length before/after RAG.
+Set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` for extra retrieval hit lists.
+
+Alias table (subset): ``luxR``→BBa_C0062, ``luxI``→BBa_C0061, ``plux``→BBa_R0062,
+``mcherry``→BBa_E1010, ``j23100``→BBa_K4233030 (dataset snapshot has no BBa_J23100),
+``b0034``→BBa_K812053 (no BBa_B0034), ``b0015``→BBa_B0015.
 """
 from __future__ import annotations
 
@@ -31,6 +36,19 @@ _DEFAULT_CHROMA = os.path.join(_MODULE_DIR, ".chroma_igem")
 _EMBED_MODEL = "all-MiniLM-L6-v2"
 _COLLECTION = "igem_parts"
 
+# Word-boundary aliases → exact ``part_name`` in ``igem_dataset.jsonl``.
+# BBa_J23100 / BBa_B0034 are not in this snapshot; we use closest documented equivalents.
+_PART_ALIASES: Dict[str, str] = {
+    "luxr": "BBa_C0062",
+    "luxi": "BBa_C0061",
+    "plux": "BBa_R0062",
+    "mcherry": "BBa_E1010",
+    "j23100": "BBa_K4233030",
+    "b0034": "BBa_K812053",
+    "b0015": "BBa_B0015",
+}
+
+_ALIAS_VERIFY_ONCE = False
 _LOCK = threading.Lock()
 _CLIENT = None
 _COLLECTION_HANDLE = None
@@ -212,6 +230,59 @@ def ensure_indexed(*, progress_cb: Optional[Any] = None) -> int:
     return collection.count()
 
 
+def _verify_alias_targets_once() -> None:
+    """Log once per process that alias targets exist in JSONL with bp counts."""
+
+    global _ALIAS_VERIFY_ONCE
+    if _ALIAS_VERIFY_ONCE:
+        return
+    _ALIAS_VERIFY_ONCE = True
+    path = _jsonl_path()
+    if not os.path.isfile(path):
+        rag_always_log(f"RAG alias verify skipped — dataset not found: {path}")
+        return
+    by_name: Dict[str, int] = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            pn = str(r.get("part_name", ""))
+            if pn:
+                by_name[pn] = len(str(r.get("sequence", "")))
+    rag_always_log("RAG alias registry — targets in JSONL (by part_name):")
+    for pn in sorted(set(_PART_ALIASES.values())):
+        L = by_name.get(pn)
+        rag_always_log(f"  {pn}: {'OK ' + str(L) + ' bp' if L is not None else 'MISSING'}")
+    rag_always_log("RAG alias keys (word-boundary match in query):")
+    for key in sorted(_PART_ALIASES.keys()):
+        pn = _PART_ALIASES[key]
+        L = by_name.get(pn)
+        rag_always_log(
+            f"  ALIAS {key!r} → {pn} ({L} bp)" if L is not None else f"  ALIAS {key!r} → {pn} (MISSING)"
+        )
+
+
+def _resolve_registry_lookup(query: str) -> Tuple[Optional[str], str]:
+    """Return ``(part_name, note)`` for direct Chroma lookup.
+
+    ``note`` is ``explicit-BBa_…``, ``alias:token``, or ``none`` (use semantic search).
+    """
+
+    q = (query or "").strip()
+    if not q:
+        return None, "none"
+    m = _BBA_RE.search(q)
+    if m:
+        return m.group(0), f"explicit-{m.group(0)}"
+    qfold = q.casefold()
+    for key in sorted(_PART_ALIASES.keys(), key=len, reverse=True):
+        if re.search(rf"\b{re.escape(key)}\b", qfold):
+            return _PART_ALIASES[key], f"alias:{key}"
+    return None, "none"
+
+
 @dataclass
 class RetrievedPart:
     part_name: str
@@ -220,6 +291,31 @@ class RetrievedPart:
     sequence: str
     similarity: float
     part_id: str = ""
+    match_kind: str = "semantic"  # exact-alias | exact-bba | semantic
+
+
+def _lookup_part_by_exact_name(part_name: str) -> Optional[RetrievedPart]:
+    """Direct metadata lookup in Chroma (same rows as JSONL index)."""
+
+    _, collection, _ = _lazy_clients()
+    raw = collection.get(
+        where={"part_name": part_name},
+        include=["metadatas"],
+        limit=1,
+    )
+    ids = raw.get("ids") or []
+    metas = raw.get("metadatas") or []
+    if not ids or not metas or not metas[0]:
+        return None
+    meta = metas[0]
+    return RetrievedPart(
+        part_id=str(meta.get("part_id", ids[0])),
+        part_name=str(meta.get("part_name", "")),
+        part_type=str(meta.get("part_type", "")),
+        short_desc=str(meta.get("short_desc", "")),
+        sequence=str(meta.get("sequence", "")),
+        similarity=1.0,
+    )
 
 
 def retrieve_parts(
@@ -227,22 +323,68 @@ def retrieve_parts(
     part_type_filter: Optional[str] = None,
     top_k: int = 3,
 ) -> List[RetrievedPart]:
-    """Plain-English (or keyword) query → top matching registry parts.
-
-    Cosine distance ``d`` from Chroma on normalized embeddings yields
-    similarity ``1 - d`` (identical to cosine similarity for unit vectors).
-    """
+    """Keyword query → matching registry parts (exact BBa / alias table, else embedding search)."""
 
     q = (query or "").strip()
     filt_suffix = (
         f" (part_type_filter={part_type_filter!r})" if part_type_filter else ""
     )
-    rag_always_log(f"RAG called for: {q!r}{filt_suffix} top_k={top_k}")
+    rag_always_log(f"RAG chroma query string: {q!r}{filt_suffix} top_k={top_k}")
     if not q:
         rag_always_log("RAG called with empty query — returning [] (no retrieval performed)")
         return []
 
     ensure_indexed()
+    lookup_name, res_note = _resolve_registry_lookup(q)
+    from_alias = res_note.startswith("alias:")
+    alias_token = res_note.split(":", 1)[1] if from_alias else ""
+
+    if lookup_name:
+        hit = _lookup_part_by_exact_name(lookup_name)
+        if hit is not None:
+            type_mismatch = bool(part_type_filter and hit.part_type != part_type_filter)
+            if type_mismatch and from_alias:
+                rag_always_log(
+                    f"type filter {part_type_filter!r} overridden for alias hit "
+                    f"(registry part is {hit.part_type!r})"
+                )
+                type_mismatch = False
+            if not type_mismatch:
+                if from_alias:
+                    rag_always_log(
+                        f"ALIAS HIT: {alias_token} -> {hit.part_name} "
+                        f"({len(hit.sequence)} bp, part_id={hit.part_id})"
+                    )
+                else:
+                    rag_always_log(
+                        f"EXACT BBa lookup: {lookup_name!r} part_id={hit.part_id} "
+                        f"type={hit.part_type!r} ({len(hit.sequence)} bp) sim=1.0000"
+                    )
+                rag_debug_log(
+                    f"retrieve exact path={res_note!r} part_name={hit.part_name!r} "
+                    f"part_id={hit.part_id!r} seq_bp={len(hit.sequence)}"
+                )
+                return [
+                    RetrievedPart(
+                        part_name=hit.part_name,
+                        part_type=hit.part_type,
+                        short_desc=hit.short_desc,
+                        sequence=hit.sequence,
+                        similarity=1.0,
+                        part_id=hit.part_id,
+                        match_kind=("exact-alias" if from_alias else "exact-bba"),
+                    )
+                ]
+            rag_debug_log(
+                f"exact part_name={lookup_name!r} type {hit.part_type!r} != "
+                f"filter {part_type_filter!r} — falling back to semantic search"
+            )
+        else:
+            rag_always_log(
+                f"exact lookup MISS part_name={lookup_name!r} (note={res_note}) — "
+                "semantic search"
+            )
+
     _, collection, model = _lazy_clients()
     emb = model.encode(q, normalize_embeddings=True)
     kwargs: dict = {
@@ -258,8 +400,12 @@ def retrieve_parts(
     dists = (raw.get("distances") or [[]])[0]
     metas = (raw.get("metadatas") or [[]])[0]
 
+    rag_always_log(
+        f"RAG SEMANTIC SEARCH query={q!r} part_type_filter={part_type_filter!r} "
+        f"n_results={kwargs['n_results']}"
+    )
     rag_debug_log(
-        f"retrieve query={q!r} part_type_filter={part_type_filter!r} top_k={kwargs['n_results']}"
+        f"retrieve semantic query={q!r} part_type_filter={part_type_filter!r} top_k={kwargs['n_results']}"
     )
 
     out: List[RetrievedPart] = []
@@ -282,9 +428,17 @@ def retrieve_parts(
         if len(desc) > 120:
             desc = desc[:117] + "…"
         rag_debug_log(
-            f"retrieve hit #{i + 1} sim={rp.similarity:.4f} part_id={rp.part_id!r} "
+            f"retrieve semantic hit #{i + 1} sim={rp.similarity:.4f} part_id={rp.part_id!r} "
             f"name={rp.part_name!r} type={rp.part_type!r} desc={desc!r} seq_bp={len(rp.sequence)}"
         )
+    if out:
+        top = out[0]
+        rag_always_log(
+            f"RAG semantic best: {top.part_name!r} part_id={top.part_id} "
+            f"sim={top.similarity:.4f} bp={len(top.sequence)}"
+        )
+    else:
+        rag_always_log("RAG semantic: no hits returned")
     return out
 
 
@@ -395,6 +549,9 @@ _GENERIC_PARTS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("CFP", "CDS"),
     ("luxAB", "CDS"),
     ("luxCDABE", "CDS"),
+    ("LuxR", "CDS"),
+    ("LuxI", "CDS"),
+    ("Plux", "Promoter"),
     ("lacI", "CDS"),
     ("tetR", "CDS"),
     ("araC", "CDS"),
@@ -504,34 +661,35 @@ def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
     if not text.strip():
         return []
 
-    found: List[Tuple[Optional[str], str]] = []
+    events: List[Tuple[int, Optional[str], str]] = []
     seen: set = set()
 
-    def push(type_hint: Optional[str], name: str) -> None:
+    def add(start: int, type_hint: Optional[str], name: str) -> None:
         key = (type_hint or "", name.lower())
         if key in seen:
             return
         seen.add(key)
         q = f"{name} {type_hint}".strip() if type_hint else name
-        found.append((type_hint, q))
+        events.append((start, type_hint, q))
 
     for m in _BBA_RE.finditer(text):
-        push(_scan_window_for_type(text, m.start(), m.end()), m.group(0))
+        add(m.start(), _scan_window_for_type(text, m.start(), m.end()), m.group(0))
 
     for m in _J_PROMOTER_RE.finditer(text):
-        push("Promoter", m.group(0))
+        add(m.start(), "Promoter", m.group(0))
 
     for m in _B_PART_RE.finditer(text):
         name = m.group(0)
         type_hint = _scan_window_for_type(text, m.start(), m.end()) or _b_part_type_prior(name)
-        push(type_hint, name)
+        add(m.start(), type_hint, name)
 
     for canonical, default_type in _GENERIC_PARTS:
         for m in re.finditer(rf"\b{re.escape(canonical)}\b", text, flags=re.IGNORECASE):
             type_hint = _scan_window_for_type(text, m.start(), m.end()) or default_type
-            push(type_hint, canonical)
+            add(m.start(), type_hint, canonical)
 
-    return found
+    events.sort(key=lambda t: t[0])
+    return [(th, q) for _, th, q in events]
 
 
 def extract_part_queries(thought: str) -> Tuple[List[Tuple[Optional[str], str]], str]:
@@ -666,15 +824,30 @@ def apply_rag_substitution(
         rag_always_log(f"{ctx}: RAG index/load FAILED — {exc!s}; using model sequence as-is")
         return seq, {"enabled": False, "error": str(exc)}
 
+    _verify_alias_targets_once()
+
     seq_clean = "".join((model_sequence or "").upper().split())
+    rag_always_log(f"{ctx}: SEQUENCE before RAG: {len(seq_clean)} bp")
+
     queries, parsing_strategy = extract_part_queries(thought)
     rag_always_log(
-        f"{ctx}: extracted {len(queries)} part query(ies) from thought "
-        f"(strategy={parsing_strategy!r})"
+        f"{ctx}: PART QUERY EXTRACTION strategy={parsing_strategy!r} count={len(queries)}"
     )
+    th_prev = (thought or "").strip()
+    if th_prev:
+        cap = 4000
+        if len(th_prev) > cap:
+            rag_always_log(
+                f"{ctx}: MODEL REASONING ({len(th_prev)} chars, first {cap} shown):\n"
+                f"{th_prev[:cap]}\n… [truncated]"
+            )
+        else:
+            rag_always_log(f"{ctx}: MODEL REASONING ({len(th_prev)} chars):\n{th_prev}")
+    else:
+        rag_always_log(f"{ctx}: MODEL REASONING: (empty)")
     for qi, (type_hint, query_text) in enumerate(queries):
         rag_always_log(
-            f"{ctx}: part_query[{qi}] type_hint={type_hint!r} query={query_text!r}"
+            f"{ctx}:   extracted[{qi}] type_hint={type_hint!r} query={query_text!r}"
         )
 
     if not queries:
@@ -712,13 +885,10 @@ def apply_rag_substitution(
 
         if best is None:
             rag_always_log(
-                f"RAG result: <none> — registry returned no hits for {query_text!r}"
+                f"{ctx}: SLOT[{i}] chroma_query={query_text!r} type_filter={type_hint!r} → "
+                f"NO HITS | model_slice_bp={len(model_slice)} | substituted=False"
             )
             merged.append(model_slice)
-            rag_always_log(
-                f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(model_slice)} "
-                f"(no registry hits at all — sequence may be hallucinated)"
-            )
             parts_out.append(
                 {
                     "query": query_text,
@@ -729,7 +899,10 @@ def apply_rag_substitution(
                     "substituted": False,
                     "similarity": None,
                     "best_candidate": None,
+                    "match_kind": None,
                     "sequence_source": "model",
+                    "model_slice_bp": len(model_slice),
+                    "dna_replaced_vs_model_slice": False,
                     "sequence": model_slice,
                 }
             )
@@ -737,17 +910,19 @@ def apply_rag_substitution(
 
         verified = sim >= thr
         registry_seq = "".join(best.sequence.upper().split())
+        mk = getattr(best, "match_kind", "semantic") or "semantic"
+        dna_replaced = verified and registry_seq != model_slice
+
         rag_always_log(
-            f"RAG result: {best.part_id} ({best.part_name}, type={best.part_type}) "
-            f"similarity={sim:.4f} threshold={thr:.4f} verified={verified}"
+            f"{ctx}: SLOT[{i}] chroma_query={query_text!r} type_filter={type_hint!r} → "
+            f"hit={best.part_name!r} part_id={best.part_id} match_kind={mk} "
+            f"sim={sim:.4f} thr={thr:.4f} verified={verified} "
+            f"hit_bp={len(registry_seq)} model_slice_bp={len(model_slice)} "
+            f"substitution_applied={verified} dna_differs_from_model_slice={dna_replaced}"
         )
 
         if verified:
             merged.append(registry_seq)
-            rag_always_log(
-                f"{ctx}: slot[{i}] SUBSTITUTED registry bp={len(registry_seq)} "
-                f"sim={sim:.4f} (≥ {thr:.4f}) part={best.part_name!r} id={best.part_id!r}"
-            )
             parts_out.append(
                 {
                     "query": query_text,
@@ -761,17 +936,15 @@ def apply_rag_substitution(
                     "part_name": best.part_name,
                     "part_type": best.part_type,
                     "short_desc": best.short_desc,
+                    "match_kind": mk,
                     "sequence_source": "registry",
+                    "model_slice_bp": len(model_slice),
+                    "dna_replaced_vs_model_slice": dna_replaced,
                     "sequence": registry_seq,
                 }
             )
         else:
             merged.append(model_slice)
-            rag_always_log(
-                f"{ctx}: slot[{i}] KEPT model DNA slice bp={len(model_slice)} "
-                f"best_hit={best.part_id!r} sim={sim:.4f} (< {thr:.4f}) — "
-                "below threshold; registry sequence not used"
-            )
             parts_out.append(
                 {
                     "query": query_text,
@@ -785,9 +958,12 @@ def apply_rag_substitution(
                     "part_name": best.part_name,
                     "part_type": best.part_type,
                     "short_desc": best.short_desc,
+                    "match_kind": mk,
                     "sequence_source": "model",
                     "reject_reason": "below_similarity_threshold",
                     "registry_candidate_bp": len(registry_seq),
+                    "model_slice_bp": len(model_slice),
+                    "dna_replaced_vs_model_slice": False,
                     "sequence": model_slice,
                 }
             )
@@ -795,6 +971,12 @@ def apply_rag_substitution(
     final = "".join(merged)
     verified_count = sum(1 for p in parts_out if p.get("verified"))
     sequence_changed = final != seq_clean
+    sub_n = sum(1 for p in parts_out if p.get("substituted"))
+    rag_always_log(
+        f"{ctx}: SEQUENCE after RAG: {len(final)} bp "
+        f"(delta {len(final) - len(seq_clean):+d} bp vs before; "
+        f"content_changed={sequence_changed}; substituted_slots={sub_n}/{len(parts_out)})"
+    )
 
     slot_audit: List[Dict[str, Any]] = []
     for i, p in enumerate(parts_out):
