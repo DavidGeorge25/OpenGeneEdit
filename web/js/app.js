@@ -467,6 +467,8 @@ function showLanding() {
   $("plasmidSites").innerHTML = "";
   $("metrics").hidden = true;
   $("seqCard").hidden = true;
+  const ragEl0 = $("ragCard");
+  if (ragEl0) ragEl0.hidden = true;
   $("passesCard").hidden = true;
   $("candidatesCard").hidden = true;
   $("paretoSection").hidden = true;
@@ -613,6 +615,62 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function renderRagPanel(rag) {
+  const card = $("ragCard");
+  const summary = $("ragSummary");
+  const list = $("ragList");
+  if (!card || !summary || !list) return;
+
+  if (!rag || rag.enabled === false) {
+    card.hidden = true;
+    summary.textContent = "";
+    list.innerHTML = "";
+    return;
+  }
+
+  if (rag.error) {
+    card.hidden = false;
+    summary.textContent = `RAG unavailable: ${rag.error}`;
+    list.innerHTML = "";
+    return;
+  }
+
+  const parts = Array.isArray(rag.parts) ? rag.parts : [];
+  if (!rag.applied || parts.length === 0) {
+    card.hidden = true;
+    summary.textContent = "";
+    list.innerHTML = "";
+    return;
+  }
+
+  card.hidden = false;
+  const minS = rag.min_similarity != null ? rag.min_similarity : 0.6;
+  const verified = parts.filter((p) => p.verified).length;
+  summary.textContent = `${verified}/${parts.length} parts matched iGEM at similarity ≥ ${minS}. Unverified slots keep model-derived DNA slices.`;
+
+  list.innerHTML = "";
+  for (const p of parts) {
+    const li = document.createElement("li");
+    li.className = p.verified ? "is-verified" : "is-unverified";
+    const title = document.createElement("div");
+    title.className = "rag-part-title";
+    title.textContent = p.verified
+      ? `${p.part_name || "—"} · ${p.part_type || ""}`
+      : "Unverified (below threshold)";
+    const meta = document.createElement("span");
+    meta.className = "rag-part-meta";
+    const sim =
+      p.similarity != null && p.similarity !== ""
+        ? Number(p.similarity).toFixed(3)
+        : "—";
+    const q = p.query || p.retrieval_query || "";
+    meta.textContent = p.verified ? `${q} · sim ${sim}` : `${q} · best sim ${sim}`;
+    li.appendChild(title);
+    li.appendChild(meta);
+    list.appendChild(li);
+  }
 }
 
 function renderCandidates(candidates, selectedId) {
@@ -1081,6 +1139,7 @@ function selectCandidate(id, { animatePasses = false } = {}) {
   renderPasses(cand.passes, { animate: animatePasses });
   renderCandidates(state.candidates, id);
   renderParetoChart(state.candidates, id);
+  renderRagPanel(cand.rag);
 
   // Reveal everything that's gated until a result exists.
   $("metrics").hidden = false;
@@ -1107,6 +1166,8 @@ async function compile() {
   badge.classList.remove("done");
   $("metrics").hidden = true;
   $("seqCard").hidden = true;
+  const ragEl1 = $("ragCard");
+  if (ragEl1) ragEl1.hidden = true;
   $("passesCard").hidden = true;
   $("candidatesCard").hidden = true;
   $("paretoSection").hidden = true;
@@ -1176,6 +1237,7 @@ async function compile() {
     renderPasses(best.passes, { animate: true });
     renderCandidates(state.candidates, state.selectedId);
     renderParetoChart(state.candidates, state.selectedId);
+    renderRagPanel(best.rag);
 
     const thoughtEl = $("thoughtText");
     thoughtEl.textContent = "";

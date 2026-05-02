@@ -4,9 +4,11 @@
 Pipeline per /api/compile request:
 
   1. inference backend → N candidate (thought, sequence) pairs
-  2. compiler passes   → per-candidate diagnostics + score-bearing metrics
-  3. ranker            → composite score + Pareto front
-  4. response          → candidates[] sorted by composite, with `is_pareto`
+  2. iGEM RAG          → optional substitution from ``igem_dataset.jsonl`` via ChromaDB
+                         (see ``igem_rag.py``); candidates gain a ``rag`` field
+  3. compiler passes   → per-candidate diagnostics + score-bearing metrics
+  4. ranker            → composite score + Pareto front
+  5. response          → candidates[] sorted by composite, with `is_pareto`
 
 The backend is resolved once inside ``inference.get_backend()`` (lazy singleton):
 
@@ -85,6 +87,23 @@ MIME = {
 # ---------------------------------------------------------------------------
 
 
+def _apply_rag_substitution(thought: str, sequence: str, *, candidate_id: str = ""):
+    """Lazy-import ``igem_rag`` so the server boots without ML deps installed."""
+
+    try:
+        from igem_rag import apply_rag_substitution as rag_fn
+
+        return rag_fn(
+            thought,
+            sequence,
+            progress_cb=compile_progress,
+            log_context=candidate_id,
+        )
+    except Exception as exc:
+        flat = "".join((sequence or "").upper().split())
+        return flat, {"enabled": False, "error": str(exc)}
+
+
 def _compile(prompt: str, n: int = 4) -> dict:
     compile_progress("compile · resolving backend…")
     backend = get_backend()
@@ -110,20 +129,36 @@ def _compile(prompt: str, n: int = 4) -> dict:
         f"static passes ({len(candidates)} seqs)…"
     )
 
+    try:
+        from igem_rag import rag_debug_log as _rag_resp_log
+    except ImportError:
+
+        def _rag_resp_log(_msg: str) -> None:
+            return None
+
     out = []
     for idx, cand in enumerate(candidates):
+        compile_progress(f"compile · iGEM RAG · candidate {idx + 1}/{len(candidates)}…")
+        final_seq, rag_detail = _apply_rag_substitution(
+            cand.thought, cand.sequence, candidate_id=cand.candidate_id
+        )
         compile_progress(f"compile · passes · candidate {idx + 1}/{len(candidates)}…")
-        passes = run_passes(cand.sequence)
-        scores = score_candidate(passes, len(cand.sequence))
+        passes = run_passes(final_seq)
+        scores = score_candidate(passes, len(final_seq))
         out.append({
             "id": cand.candidate_id,
             "thought": cand.thought,
-            "sequence": cand.sequence,
+            "sequence": final_seq,
             "strategy": cand.strategy,
             "strategy_name": cand.strategy_name,
             "passes": passes_to_dicts(passes),
             "scores": scores_to_dict(scores),
+            "rag": rag_detail,
         })
+        _rag_resp_log(
+            f"server: candidate {cand.candidate_id} API payload `sequence` len={len(final_seq)} bp "
+            f"(after RAG substitution — same string the frontend renders)"
+        )
 
     compile_progress("compile · ranking · Pareto front…")
     ranked = rank(out)
@@ -178,6 +213,16 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
     set_compile_progress_hook(push)
     set_compile_stream_hook(push_stream)
     try:
+        try:
+            from igem_rag import set_rag_debug_mirror
+
+            set_rag_debug_mirror(
+                lambda ln: _job_append_line(
+                    job_id, f"{time.strftime('%H:%M:%S')}  [rag] {ln}"
+                )
+            )
+        except ImportError:
+            pass
         push("job · started")
         result = _compile(prompt, n=n)
         with _JOBS_LOCK:
@@ -195,6 +240,12 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
     finally:
         set_compile_progress_hook(None)
         set_compile_stream_hook(None)
+        try:
+            from igem_rag import set_rag_debug_mirror
+
+            set_rag_debug_mirror(None)
+        except ImportError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +255,16 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "DGeneCompiler/2.0"
+
+    def log_message(self, format: str, *args) -> None:
+        """Hide noisy poll spam so stderr stays readable (e.g. RAG ``[dgene/rag]`` lines)."""
+        try:
+            rendered = format % args if args else format
+        except Exception:
+            rendered = str(format)
+        if "/api/compile/status" in rendered or "/api/health" in rendered:
+            return
+        super().log_message(format, *args)
 
     def _write_body(self, body: bytes) -> None:
         """Write response body; ignore client disconnect (avoids secondary tracebacks)."""
@@ -371,7 +432,6 @@ def main() -> None:
         print(f"[server] Backend init failed at boot: {exc}", file=sys.stderr)
 
     print(f"DGene compiler UI: http://127.0.0.1:{port}/")
-    print('API: POST /api/compile  JSON {"prompt": "...", "n": 4}')
     httpd.serve_forever()
 
 

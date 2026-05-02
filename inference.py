@@ -23,8 +23,9 @@ Malformed model output fails the request (**no skipping** failed candidates).
 ``.env`` in this package directory is loaded on import (existing environment
 variables are not overwritten).
 
-Set ``DGENE_DEBUG=1`` or ``DGENE_GEMINI_DEBUG=1`` for stderr traces (HTTP timings,
-retries, candidate threads). Restart the server after changing ``.env``.
+Set ``DGENE_GEMINI_DEBUG=1`` for Gemini HTTP / retry stderr traces (``[dgene/infer]``).
+``DGENE_DEBUG=1`` does not enable those lines (use it with RAG: see ``igem_rag`` / ``DGENE_RAG_DEBUG``).
+Restart the server after changing ``.env``.
 """
 from __future__ import annotations
 
@@ -158,6 +159,34 @@ def _strip_markdown_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _strip_trailing_stop_markers(text: str) -> str:
+    """Remove ``</circuit>`` and trailing ``` so DNA extraction still works."""
+
+    t = (text or "").strip()
+    while t:
+        u = t.rstrip()
+        low = u.lower()
+        if low.endswith("</circuit>"):
+            i = low.rfind("</circuit>")
+            t = u[:i].rstrip()
+            continue
+        u2 = u.rstrip()
+        if u2.endswith("```"):
+            t = u2[:-3].rstrip()
+            continue
+        break
+    return t
+
+
+# Opening line variants (models sometimes emit ``<|channel|>thought`` with an extra pipe).
+_CHANNEL_OPEN_RE = re.compile(
+    r"<\|channel\s*>\s*thought|<\|channel\|\s*>\s*thought",
+    re.IGNORECASE | re.DOTALL,
+)
+# Closing markers (canonical ``<channel|>`` or mistaken ``<|channel|>``).
+_CHANNEL_CLOSE_RE = re.compile(r"<channel\s*\|>|<\|channel\|>", re.IGNORECASE)
+
+
 def _min_parse_dna_length() -> int:
     raw = os.environ.get("DGENE_MIN_PARSE_DNA_LEN", "").strip()
     if raw:
@@ -194,26 +223,48 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
         <channel|>
         DNA...
 
-    Tolerates leading preamble, markdown fences, and non-DNA text after the sequence.
+    Tolerates leading preamble, markdown fences, ``<|channel|>thought`` typos,
+    optional ``</circuit>`` / fences after DNA, and non-DNA text after the sequence.
     """
-    raw_in = model_output.strip()
-    idx = raw_in.find("<|channel>thought")
-    if idx > 0:
-        raw_in = raw_in[idx:]
-    raw = _strip_markdown_fences(raw_in)
+    raw_in = (model_output or "").strip()
+    raw_in = _strip_markdown_fences(raw_in)
+    mo_skip = _CHANNEL_OPEN_RE.search(raw_in)
+    if mo_skip:
+        raw_in = raw_in[mo_skip.start() :]
+
+    raw = _strip_trailing_stop_markers(raw_in)
+    raw = _strip_markdown_fences(raw)
     min_dna = _min_parse_dna_length()
 
-    channel_pat = re.compile(
-        r"<\|channel\>thought\s*(.*?)\s*<channel\|>",
-        re.DOTALL,
-    )
-    match = channel_pat.search(raw)
-    if match:
-        thought = match.group(1).strip()
-        tail = raw[match.end() :].strip()
-        sequence = _extract_dna_after_marker(tail, min_len=min_dna)
-        if thought and sequence:
-            return thought, sequence
+    mo = _CHANNEL_OPEN_RE.search(raw)
+    if mo:
+        after_open = raw[mo.end() :]
+        mc = _CHANNEL_CLOSE_RE.search(after_open)
+        if mc:
+            thought = after_open[: mc.start()].strip()
+            tail = _strip_trailing_stop_markers(after_open[mc.end() :].strip())
+            sequence = _extract_dna_after_marker(tail, min_len=min_dna)
+            if thought and sequence:
+                return thought, sequence
+
+    for pat in (
+        re.compile(
+            r"<\|channel\s*>\s*thought\s*(.*?)\s*<channel\s*\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        re.compile(
+            r"<\|channel\|\s*thought\s*(.*?)\s*<channel\s*\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        re.compile(r"<\|channel\>thought\s*(.*?)\s*<channel\|>", re.DOTALL),
+    ):
+        match = pat.search(raw)
+        if match:
+            thought = match.group(1).strip()
+            tail = _strip_trailing_stop_markers(raw[match.end() :].strip())
+            sequence = _extract_dna_after_marker(tail, min_len=min_dna)
+            if thought and sequence:
+                return thought, sequence
 
     strict = re.compile(
         r"<\|channel\>thought\s*(.*?)\s*<channel\|>\s*([ACGTNacgtn\s]+)\s*$",
@@ -226,10 +277,21 @@ def parse_thought_and_sequence(model_output: str) -> Tuple[str, str]:
         if thought and sequence:
             return thought, sequence
 
+    mc2 = _CHANNEL_CLOSE_RE.search(raw)
+    if mc2:
+        head = raw[: mc2.start()]
+        tail = _strip_trailing_stop_markers(raw[mc2.end() :].strip())
+        thought = _CHANNEL_OPEN_RE.sub("", head, count=1).strip()
+        sequence = _extract_dna_after_marker(tail, min_len=min_dna)
+        if thought and sequence:
+            return thought, sequence
+
     if "<|channel>thought" in raw and "<channel|>" in raw:
         thought_part, seq_part = raw.split("<channel|>", 1)
         thought = thought_part.replace("<|channel>thought", "", 1).strip()
-        sequence = _extract_dna_after_marker(seq_part, min_len=min_dna)
+        sequence = _extract_dna_after_marker(
+            _strip_trailing_stop_markers(seq_part.strip()), min_len=min_dna
+        )
         if thought and sequence:
             return thought, sequence
 
@@ -240,7 +302,17 @@ _FORMAT_RETRY_SUFFIX = (
     "\n\n**Format correction (required):** Your reply must start with `<|channel>thought` "
     "as the very first characters—no title, no markdown fence, no preamble. "
     "End reasoning with `<channel|>` on its own line. "
-    "After that line output only A/C/G/T nucleotides (≥12 bp), then stop."
+    "After that line output only A/C/G/T nucleotides (≥12 bp). "
+    "Then one more line containing exactly `</circuit>`. No triple backticks anywhere."
+)
+
+_FORMAT_RETRY_STRICT = (
+    "\n\n**Final attempt — copy this skeleton exactly (replace the DNA run only):**\n"
+    "<|channel>thought\n"
+    "Brief reasoning about promoters, genes, and regulation.\n"
+    "<channel|>\n"
+    "ATCGATCGATCGATCGATCGATCG\n"
+    "</circuit>"
 )
 
 
@@ -264,6 +336,38 @@ _GEMINI_API_BASE = (
     or "https://generativelanguage.googleapis.com/v1beta"
 )
 
+# Only ``</circuit>`` — `` ```\\n\\n`` matched fenced blocks inside reasoning and truncated output.
+_GEMINI_STOP_SEQUENCES = ["</circuit>"]
+
+_GEMINI_SYSTEM_STOP_INSTRUCTION = (
+    "You are the DGene DNA compiler. Your reply MUST follow this exact channel-tag schema and "
+    "nothing else:\n"
+    "  Line 1 (literal): <|channel>thought\n"
+    "  Lines 2..k:       one short paragraph of design reasoning that names the chosen "
+    "promoter / RBS / CDS / terminator parts.\n"
+    "  Line k+1 (literal): <channel|>\n"
+    "  Line k+2:           a single continuous DNA string using ONLY the letters A, C, G, T "
+    "(uppercase, ≥12 nt, no spaces, no line breaks, no FASTA header, no numbering).\n"
+    "  Line k+3 (literal): </circuit>\n\n"
+    "Hard rules — any violation is a wrong answer:\n"
+    "1. The very first characters of the reply must be the literal text <|channel>thought "
+    "(angle bracket, vertical bar, the word channel, angle bracket, the word thought). "
+    "No preamble, no greeting, no markdown fence, no JSON, no YAML.\n"
+    "2. The mid-reply marker is exactly <channel|> on its own line.\n"
+    "3. Do not output triple backticks (```), code fences, or Markdown formatting anywhere.\n"
+    "4. End with </circuit> on its own line and stop."
+)
+
+# Verbatim schema we show in prompts AND echo on parse failures so users can see exactly what
+# the model was supposed to produce.
+_EXPECTED_OUTPUT_SCHEMA = (
+    "<|channel>thought\n"
+    "<one short paragraph of design reasoning naming promoter/RBS/CDS/terminator>\n"
+    "<channel|>\n"
+    "<continuous DNA string of A/C/G/T, ≥12 nt, no whitespace>\n"
+    "</circuit>"
+)
+
 
 def _pick_google_api_key() -> Optional[str]:
     """First non-empty key from GEMINI_API_KEY, GOOGLE_API_KEY, or DGENE_GOOGLE_API_KEY."""
@@ -278,17 +382,31 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
     brief = user_design_brief.strip()
     return (
         "You are DGene, a synthetic-biology DNA compiler. Read the user's circuit brief and "
-        "output one DNA construct solution.\n\n"
+        "output ONE DNA construct solution that follows the exact schema below — no other "
+        "text, no markdown fences, no JSON, no YAML, no FASTA header.\n\n"
         "**User brief**\n"
         f"{brief}\n\n"
-        "**Output format (required)**\n"
-        "- Start immediately with `<|channel>thought` on its own opening line.\n"
-        "- After one paragraph of reasoning with concrete parts and trade-offs, emit the closing "
-        "`<channel|>` marker on its own line.\n"
-        "- Below that marker, emit one continuous nucleotide DNA string using ONLY letters "
-        "`A`, `C`, `G`, and `T` (no FASTA headers, numbering, whitespace, or line breaks inside "
-        "the DNA string).\n\n"
-        "The first characters of your reply must be `<|channel>thought`. Nothing before them.\n"
+        "**Required output schema (your reply must match this template exactly):**\n"
+        f"{_EXPECTED_OUTPUT_SCHEMA}\n\n"
+        "**Concrete worked example — copy the structure, replace only the reasoning text "
+        "and the DNA run with your own:**\n"
+        "<|channel>thought\n"
+        "Use J23100 promoter, B0034 RBS, GFP CDS, and B0015 terminator for constitutive "
+        "fluorescence in E. coli; J23100 is medium-strength and B0015 is a strong double "
+        "terminator.\n"
+        "<channel|>\n"
+        "TTGACAGCTAGCTCAGTCCTAGGTACAGTGCTAGCAAAGAGGAGAAAATGCGTAAA\n"
+        "</circuit>\n\n"
+        "**Hard rules (any violation is a wrong answer):**\n"
+        "1. The very first characters of your reply MUST be the literal text <|channel>thought. "
+        "No preamble (\"Here's a design:\"), no greeting, no markdown fence, no JSON, no YAML, "
+        "no `# Design` heading.\n"
+        "2. The mid-reply marker is exactly <channel|> on its own line — single pipe before "
+        "the closing angle bracket.\n"
+        "3. The DNA line must be one continuous string of A, C, G, T (uppercase, ≥12 nt). "
+        "No spaces, no line breaks inside the DNA, no numbering, no FASTA `>` line.\n"
+        "4. End with </circuit> on its own line and stop.\n"
+        "5. Never output triple backticks anywhere in the reply.\n"
     )
 
 
@@ -328,8 +446,8 @@ def _gemini_env_bool(name: str, default: bool) -> bool:
 
 
 def infer_debug_enabled() -> bool:
-    """True when ``DGENE_DEBUG`` or ``DGENE_GEMINI_DEBUG`` is set (stderr traces)."""
-    return _gemini_env_bool("DGENE_DEBUG", False) or _gemini_env_bool("DGENE_GEMINI_DEBUG", False)
+    """Gemini/API stderr traces — ``DGENE_GEMINI_DEBUG`` only (not ``DGENE_DEBUG``)."""
+    return _gemini_env_bool("DGENE_GEMINI_DEBUG", False)
 
 
 def infer_debug_log(line: str) -> None:
@@ -339,6 +457,46 @@ def infer_debug_log(line: str) -> None:
     ts = time.strftime("%H:%M:%S")
     sys.stderr.write(f"[dgene/infer {ts}] {line}\n")
     sys.stderr.flush()
+
+
+def _infer_always_log(line: str) -> None:
+    """Always-on stderr log line (regardless of DGENE_GEMINI_DEBUG).
+
+    Used for high-signal events like parse failures so they are never silently swallowed.
+    """
+    ts = time.strftime("%H:%M:%S")
+    sys.stderr.write(f"[dgene/infer {ts}] {line}\n")
+    sys.stderr.flush()
+
+
+def log_parse_failure(ctx: str, raw_text: str, exc: BaseException) -> None:
+    """Dump the raw model output + the expected schema when the channel-tag parser rejects it.
+
+    Writes to stderr unconditionally and mirrors a compact summary into the compile-progress
+    stream so the failure is visible in the live UI panel even without ``DGENE_GEMINI_DEBUG``.
+    """
+
+    text = raw_text or ""
+    n = len(text)
+    head_cap = 1200
+    tail_cap = 400
+    head = text[:head_cap]
+    tail = text[-tail_cap:] if n > head_cap + tail_cap else ""
+
+    _infer_always_log(f"{ctx} parse FAILED: {exc!s}")
+    _infer_always_log(f"{ctx} raw model output ({n} chars) head: {head!r}")
+    if tail:
+        _infer_always_log(f"{ctx} raw model output tail: {tail!r}")
+    _infer_always_log(
+        f"{ctx} expected schema (verbatim, newline-separated):\n{_EXPECTED_OUTPUT_SCHEMA}"
+    )
+
+    short_head = head[:240].replace("\n", " ⏎ ")
+    compile_progress(f"gemma · {ctx} · parse FAILED: {exc} · raw_head={short_head!r}")
+    compile_progress(
+        "gemma · expected: <|channel>thought … <channel|> ACGT… </circuit> "
+        "(no markdown fence, no JSON, no preamble)"
+    )
 
 
 def _gemini_error_is_transient(msg: str) -> bool:
@@ -382,9 +540,11 @@ def _gemini_post(
     if infer_debug_enabled():
         gen = (body.get("generationConfig") or {}) if isinstance(body, dict) else {}
         mo = gen.get("maxOutputTokens")
+        ss = gen.get("stopSequences") if isinstance(gen, dict) else None
         infer_debug_log(
             f"{tag}generateContent → model={model_id!r} api_base={base!r} "
-            f"body_bytes={len(encoded)} timeout_s={timeout:.0f} max_out_tokens={mo!r}"
+            f"body_bytes={len(encoded)} timeout_s={timeout:.0f} max_out_tokens={mo!r} "
+            f"stop_sequences={ss!r}"
         )
     t0 = time.perf_counter()
     hb_sec_raw = os.environ.get("DGENE_GEMINI_HTTP_HEARTBEAT_SEC", "15").strip()
@@ -579,6 +739,10 @@ def _apply_optional_thinking_config(gen_cfg: dict) -> None:
         gen_cfg["thinkingConfig"] = {"thinkingLevel": lvl}
 
 
+def _apply_gemini_stop_sequences(gen_cfg: dict) -> None:
+    gen_cfg["stopSequences"] = list(_GEMINI_STOP_SEQUENCES)
+
+
 def _gemini_generate_text_with_retries(
     api_key: str, model_id: str, body: dict, *, debug_ctx: str = ""
 ) -> str:
@@ -643,8 +807,10 @@ def _gemini_generate_single(
 ) -> str:
     gen_cfg: dict = {"temperature": temperature, "maxOutputTokens": max_out}
     _apply_optional_thinking_config(gen_cfg)
+    _apply_gemini_stop_sequences(gen_cfg)
     body: dict = {
         "contents": [{"parts": [{"text": prompt_text}]}],
+        "systemInstruction": {"parts": [{"text": _GEMINI_SYSTEM_STOP_INSTRUCTION}]},
         "generationConfig": gen_cfg,
     }
     return _gemini_generate_text_with_retries(
@@ -676,12 +842,17 @@ def generate_text_gemma4(
         ),
     }
     _apply_optional_thinking_config(gen_cfg)
+    _apply_gemini_stop_sequences(gen_cfg)
+    sys_parts = (
+        _GEMINI_SYSTEM_STOP_INSTRUCTION + "\n\n" + system_message
+        if system_message
+        else _GEMINI_SYSTEM_STOP_INSTRUCTION
+    )
     body: dict = {
         "contents": [{"parts": [{"text": user_message}]}],
+        "systemInstruction": {"parts": [{"text": sys_parts}]},
         "generationConfig": gen_cfg,
     }
-    if system_message:
-        body["systemInstruction"] = {"parts": [{"text": system_message}]}
 
     text = _gemini_generate_text_with_retries(
         key, mid, body, debug_ctx="generate_text_gemma4"
@@ -716,17 +887,18 @@ class GeminiBackend:
             infer_debug_log(
                 f"{ctx} start T={temps[i % len(temps)]} thread={threading.current_thread().name!r}"
             )
-            tmpl_retry = template + _FORMAT_RETRY_SUFFIX
             thought = ""
             sequence = ""
             text = ""
-            for attempt in range(2):
-                use_template = template if attempt == 0 else tmpl_retry
+            _retry_blocks = ("", _FORMAT_RETRY_SUFFIX, _FORMAT_RETRY_STRICT)
+            for attempt in range(3):
+                use_template = template + _retry_blocks[attempt]
                 if attempt > 0:
                     compile_progress(
-                        f"gemma · candidate {i + 1}/{n} · retry · stricter format reminder…"
+                        f"gemma · candidate {i + 1}/{n} · parse retry {attempt + 1}/3 · "
+                        "stricter format…"
                     )
-                    infer_debug_log(f"{ctx} parse retry attempt 2")
+                    infer_debug_log(f"{ctx} parse retry attempt {attempt + 1}")
                 t_c0 = time.perf_counter()
                 text = _gemini_generate_single(
                     self.api_key,
@@ -747,14 +919,14 @@ class GeminiBackend:
                     thought, sequence = parse_thought_and_sequence(text)
                     break
                 except ValueError as exc:
-                    if attempt == 0:
-                        infer_debug_log(f"{ctx} parse failed, retrying once: {exc!s}")
+                    log_parse_failure(f"{ctx} attempt {attempt + 1}/3", text, exc)
+                    if attempt < 2:
                         continue
-                    infer_debug_log(f"{ctx} parse FAILED: {exc!s}")
                     raise RuntimeError(
-                        f"Hosted Gemma output for candidate {i} is not parseable "
+                        f"Hosted Gemma output for candidate {i} is not parseable after 3 retries "
                         "(expected `<|channel>thought … <channel|>` then a DNA string of A/C/G/T). "
-                        "Try again, or set DGENE_MIN_PARSE_DNA_LEN=8 if the design is very short."
+                        "See [dgene/infer] log lines above for the raw output that failed; "
+                        "set DGENE_MIN_PARSE_DNA_LEN=8 if the design is very short."
                     ) from exc
             infer_debug_log(
                 f"{ctx} done seq_len={len(sequence)} thought_chars={len(thought)}"
@@ -848,16 +1020,18 @@ class GGUFBackend:
                 top_p=0.95,
                 top_k=40,
                 seed=_seed_for(prompt, i),
-                stop=["</s>", "<|user|>"],
+                stop=["</s>", "<|user|>", "</circuit>"],
             )
             text = res["choices"][0]["text"]
             full = formatted + text
             try:
                 thought, sequence = parse_thought_and_sequence(full)
             except ValueError as exc:
+                log_parse_failure(f"gguf cand_{i}", full, exc)
                 raise RuntimeError(
                     f"Local GGUF Gemma candidate {i} is not parseable "
-                    "(expected `<|channel>thought … <channel|>` then ATCG)."
+                    "(expected `<|channel>thought … <channel|>` then ATCG). "
+                    "See [dgene/infer] log lines above for the raw output that failed."
                 ) from exc
             out.append(Candidate(
                 candidate_id=f"cand_{i}",

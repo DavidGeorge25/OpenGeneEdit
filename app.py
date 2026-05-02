@@ -7,6 +7,16 @@ from inference import parse_thought_and_sequence, run_inference
 from visualizer import generate_interactive_plasmid_plot
 
 
+def _apply_rag_substitution(thought: str, sequence: str):
+    try:
+        from igem_rag import apply_rag_substitution as rag_fn
+
+        return rag_fn(thought, sequence, progress_cb=None, log_context="streamlit")
+    except Exception as exc:
+        flat = "".join((sequence or "").upper().split())
+        return flat, {"enabled": False, "error": str(exc)}
+
+
 def render_bokeh_figure(fig, *, use_container_width: bool = True) -> None:
     """Prefer streamlit-bokeh (non-deprecated); fall back to st.bokeh_chart on older stacks."""
     try:
@@ -103,6 +113,16 @@ if submit:
         status = st.status("Running compiler backend...", expanded=False)
         raw_output = run_inference(prompt)
         thought_text, dna_sequence = parse_thought_and_sequence(raw_output)
+        dna_sequence, rag_detail = _apply_rag_substitution(thought_text, dna_sequence)
+        if rag_detail.get("applied"):
+            st.caption(
+                "iGEM parts: verified registry sequences substituted where similarity ≥ threshold; "
+                "see expanded details."
+            )
+            with st.expander("iGEM RAG (verification)", expanded=False):
+                st.json(rag_detail)
+        elif rag_detail.get("error"):
+            st.caption(f"iGEM RAG unavailable: {rag_detail['error']}")
         plasmid_figure = generate_interactive_plasmid_plot(dna_sequence)
         status.update(label="Compile complete", state="complete")
 

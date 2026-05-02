@@ -1,0 +1,7 @@
+# Core compiler UI / API (install as needed for your setup)
+# streamlit  # app.py
+# llama-cpp-python  # local GGUF
+
+# iGEM RAG (igem_rag.py — ChromaDB + embeddings)
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
