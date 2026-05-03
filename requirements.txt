@@ -1,7 +1,4 @@
-# Core compiler UI / API (install as needed for your setup)
-# streamlit  # app.py
-# llama-cpp-python  # local GGUF
-
-# iGEM RAG (igem_rag.py — ChromaDB + embeddings)
+# OpenGeneEdit web stack: stdlib ThreadingHTTPServer in server.py (not WSGI — do not use gunicorn).
+# RAG / embeddings (heavy on RAM ~2GB+ recommended on first Chroma index build):
 chromadb>=0.4.0
 sentence-transformers>=2.2.0

@@ -1106,32 +1106,46 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    base_port = int(os.environ.get("PORT", "8765"))
     if not os.path.isdir(WEB_ROOT):
         print(f"Missing web root: {WEB_ROOT}", file=sys.stderr)
         sys.exit(1)
 
+    # Railway / Render / Fly inject PORT — bind exactly that port (router never follows +1…+31).
+    # Omit PORT locally to keep legacy behaviour: try 8765 then bump until free.
+    port_raw = os.environ.get("PORT")
     httpd = None
-    port = base_port
-    for offset in range(32):
-        cand = base_port + offset
+    port = 8765
+    if port_raw is not None and str(port_raw).strip() != "":
+        port = int(port_raw)
         try:
-            httpd = ThreadingHTTPServer(("", cand), Handler)
-            port = cand
-            break
+            httpd = ThreadingHTTPServer(("", port), Handler)
         except OSError as exc:
-            if exc.errno not in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", -1)):
-                raise
-            if offset == 31:
-                print(
-                    f"No free port in {base_port}–{base_port + 31}. "
-                    "Set PORT=... or stop the process using that range.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-    if port != base_port:
-        print(f"Port {base_port} in use; listening on {port} instead.", file=sys.stderr)
+            print(
+                f"[server] Fatal: could not bind PORT={port} (all interfaces): {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        base_port = 8765
+        port = base_port
+        for offset in range(32):
+            cand = base_port + offset
+            try:
+                httpd = ThreadingHTTPServer(("", cand), Handler)
+                port = cand
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", -1)):
+                    raise
+                if offset == 31:
+                    print(
+                        f"No free port in {base_port}–{base_port + 31}. "
+                        "Set PORT=... or stop the process using that range.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+        if port != base_port:
+            print(f"Port {base_port} in use; listening on {port} instead.", file=sys.stderr)
 
     # Pre-warm the backend so first compile isn't slow on cold start.
     try:
@@ -1140,7 +1154,15 @@ def main() -> None:
     except Exception as exc:
         print(f"[server] Backend init failed at boot: {exc}", file=sys.stderr)
 
-    print(f"OpenGeneEdit compiler UI: http://127.0.0.1:{port}/")
+    public = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    if public:
+        print(f"OpenGeneEdit listening on 0.0.0.0:{port} · https://{public}/", file=sys.stderr)
+    else:
+        print(
+            f"OpenGeneEdit listening on 0.0.0.0:{port}/ (local: http://127.0.0.1:{port}/)",
+            file=sys.stderr,
+        )
+
     httpd.serve_forever()
 
 

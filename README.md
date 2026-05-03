@@ -77,9 +77,20 @@ Restart the server after changing `.env`.
 python3 server.py
 ```
 
-Opens at `http://127.0.0.1:8765/` by default (or next free port). Override with `PORT`.
+Opens at `http://127.0.0.1:8765/` by default when **`PORT` is unset** (next free port if busy). On Railway / Render / Fly, **`PORT` is always set** — the server binds **only** that port (required for correct routing).
 
-**Streamlit**
+### Railway (single URL for judges)
+
+This repo ships **`Procfile`**, **`railway.toml`**, and **`runtime.txt`**. Deploy from GitHub and set **`GEMINI_API_KEY`** or **`GOOGLE_API_KEY`** (and optionally **`DGENE_GEMINI_MODEL`**) in Railway Variables.
+
+- **Start:** `python server.py` (same as Procfile `web` process). **Not** gunicorn — the HTTP stack is stdlib, not WSGI.
+- **Health check:** `GET /api/health`
+- **RAM:** Prefer **≥ 2 GB**; `sentence-transformers` / first Chroma embed build are memory-heavy.
+- **Ephemeral disk:** `.chroma_igem/` and snapshots reset on redeploy; first compile after deploy may be slower.
+
+Public URL shape: `https://<service>.up.railway.app/` serves **`/`** (static UI from `web/`) and **`/api/*`** on the same host.
+
+### Streamlit playground
 
 ```bash
 streamlit run app.py
@@ -90,6 +101,7 @@ streamlit run app.py
 | Path | Role |
 |------|------|
 | `server.py` | Threading HTTP server, `/api/compile`, static `web/` |
+| `railway.toml`, `Procfile`, `runtime.txt` | Railway / Nixpacks hints (`python server.py`, health `/api/health`) |
 | `inference.py` | Gemma 4 backends and parsing |
 | `igem_rag.py` | ChromaDB + embeddings RAG layer |
 | `passes.py` / `ranker.py` | Candidate diagnostics and scoring |
