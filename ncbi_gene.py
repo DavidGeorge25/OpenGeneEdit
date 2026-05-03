@@ -18,6 +18,10 @@ Environment:
   • ``DGENE_NCBI_ORGANISMS`` — comma-separated scientific names to try in order
     (default: Pseudomonas aeruginosa, Escherichia coli).
 
+  • ``DGENE_NCBI_PROMOTER_SLOTS`` — if ``1``, allow Entrez on **Promoter**-typed slots
+    (default ``0``). Gene summaries return CDS / locus intervals, not short cis-regulatory
+    promoter DNA, so the default avoids misleading “fixes” for promoter queries.
+
 Cache: ``.chroma_igem/ncbi_gene_cache.json`` (same gitignored tree as Chroma).
 """
 from __future__ import annotations
@@ -381,14 +385,22 @@ _B_NUM = re.compile(r"^B\d{4}$", re.I)
 _J_NUM = re.compile(r"^J\d{5}$", re.I)
 
 
+def _ncbi_promoter_slots_enabled() -> bool:
+    """Gene fetch returns CDS / gene locus — not cis-regulatory promoter DNA.
+
+    Default **off** so a "PldhA promoter" slot does not silently pull an unrelated
+    genomic interval. Enable with ``DGENE_NCBI_PROMOTER_SLOTS=1`` when you rely on
+    mis-typed regulator names in promoter slots."""
+    v = os.environ.get("DGENE_NCBI_PROMOTER_SLOTS", "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def gene_symbol_eligible_for_ncbi(query_text: str, type_hint: Optional[str]) -> Optional[str]:
     """Extract a single gene symbol from an enriched RAG query, or ``None`` if NCBI should not run."""
 
-    # RBS / terminator parts are never NCBI Gene rows. Promoter-typed slots are
-    # still eligible — model reasoning often mis-labels a regulator protein as a
-    # promoter (e.g. "PhzR … promoter"), and J##### / B#### / BBa_ IDs are
-    # filtered out below anyway.
     if type_hint in ("RBS", "Terminator"):
+        return None
+    if (type_hint or "").strip() == "Promoter" and not _ncbi_promoter_slots_enabled():
         return None
     q = (query_text or "").strip()
     if not q:

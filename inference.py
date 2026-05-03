@@ -41,8 +41,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Iterator, List, Optional, Tuple
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -132,6 +132,8 @@ class Candidate:
     strategy: str = ""
     strategy_name: str = ""
     raw: str = ""
+    # When set (RAG-first pipeline), server skips post-hoc ``apply_rag_substitution``.
+    rag_first_detail: Optional[dict] = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +429,16 @@ _GEMINI_SYSTEM_STOP_INSTRUCTION = (
     "You are the DGene DNA compiler. Begin immediately: the FIRST characters you emit must "
     "be the literal text <|channel>thought — no preamble, greeting, markdown, bullets, "
     "asterisks, headings, or hidden planning. Never write lines starting with `*` or `-` "
-    "or numbered lists; never use \"Wait,\" or step-checklists. "
+    "or numbered lists; never use \"Wait,\" or step-checklists. Never echo scaffolding like "
+    "\"Line 1:\", checklist lines, or the words \"Worked example\". "
     "The complete reply is ONLY: line <|channel>thought, then one short paragraph "
     "(≤5 sentences, single paragraph), then line <channel|>, then ONE line of DNA "
     "(A/C/G/T only, no spaces inside that line), then line </circuit> and STOP — nothing "
     "after </circuit>. First byte must be `<`. iGEM names (J23100, B0034, BBa_…) belong "
-    "only in that paragraph. Emit a continuous DNA line long enough for the design (no "
-    "ellipsis). No triple backticks or code fences. No meta-labels like \"Paragraph:\"."
+    "only in that paragraph. The DNA line may be long real sequence OR a repetitive "
+    "placeholder (e.g. ATGC copied many times to ≥200 nt) — a later step substitutes "
+    "registry DNA using the paragraph names. No ellipsis. "
+    "No triple backticks or code fences. No meta-labels like \"Paragraph:\"."
 )
 
 # Verbatim schema we show in prompts AND echo on parse failures so users can see exactly what
@@ -465,6 +470,11 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "header.\n\n"
         "**Speed rule:** Answer in one pass. Do not plan, enumerate parts in bullets, or repeat "
         "the rules below — go straight to the four-line template.\n\n"
+        "**DNA line (latency):** You may output filler DNA only: repeat ATGC hundreds of "
+        "times on one line (≥200 nucleotides, A/C/G/T only). A downstream verifier swaps in "
+        "real BioBrick DNA for parts you explicitly name in the reasoning paragraph — that "
+        "paragraph must still enumerate the real promoters, RBS, CDS, terminator, regulators, "
+        "and operators your design relies on.\n\n"
         "**User brief**\n"
         f"{brief}\n\n"
         "**Worked example — copy this structure verbatim, then replace ONLY (a) the reasoning "
@@ -482,12 +492,14 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "RBS, CDS, terminator, and any operators or regulators) using their canonical iGEM "
         "identifiers when possible (e.g. J23100, B0034, sfGFP, B0015, lacO, PbrA). The "
         "downstream registry-verification step searches your reasoning for these names.\n\n"
-        "**Hard rules (any violation is a wrong answer):**\n"
+        "**Hard rules — follow them silently; NEVER mirror them as headings, bullets, numbered "
+        "steps, \"Line k:\", or checklists:**\n"
         "1. The very first characters of your reply MUST be the literal text <|channel>thought. "
         "No preamble (\"Here's a design:\"), no greeting, no markdown fence.\n"
         "2. The mid-reply marker is exactly <channel|> on its own line — single pipe before "
         "the closing angle bracket.\n"
-        "3. The DNA line must be one continuous string of A, C, G, T (uppercase, ≥12 nt). "
+        "3. The DNA line must be one continuous string of A, C, G, T (uppercase, ≥12 nt — "
+        "prefer ≥200 using ATGC repeats if speed matters). "
         "No spaces, no line breaks inside the DNA, no numbering, no FASTA `>` line.\n"
         "4. End with </circuit> on its own line and stop immediately after that — the API "
         "uses this as a stop sequence; emitting </circuit> ends generation.\n"
@@ -495,7 +507,8 @@ def _gemini_prompt_template(user_design_brief: str) -> str:
         "6. No outlines, self-dialogue, \"Wait\", or meta-commentary — one short paragraph "
         "then DNA then </circuit>.\n"
         "7. Never use markdown bullets (`*`, `-`, numbered lists) or nested indentation — "
-        "only plain sentences in the thought paragraph.\n"
+        "only plain sentences in the thought paragraph; never summarize the required schema "
+        "as your own numbered plan.\n"
         "8. The DNA line is a single token run: no space characters anywhere in it.\n"
     )
 
@@ -968,6 +981,82 @@ def _gemini_generate_single(
     )
 
 
+def _gemini_generate_custom(
+    api_key: str,
+    model_id: str,
+    prompt_text: str,
+    system_instruction: str,
+    temperature: float,
+    max_out: int,
+    *,
+    stop_sequences: Optional[List[str]] = None,
+    debug_ctx: str = "",
+) -> str:
+    """Hosted Gemma call with a caller-defined system prompt and optional stop sequences.
+
+    ``stop_sequences`` semantics:
+
+    * ``None`` — use default DNA-compiler stops (``</circuit>``).
+    * ``[]`` — omit ``stopSequences`` in the API request (no early stop).
+    * non-empty — use exactly the provided list.
+    """
+
+    gen_cfg: dict = {"temperature": temperature, "maxOutputTokens": max_out}
+    _apply_optional_thinking_config(gen_cfg)
+    if stop_sequences is None:
+        _apply_gemini_stop_sequences(gen_cfg)
+    elif len(stop_sequences) > 0:
+        gen_cfg["stopSequences"] = list(stop_sequences)
+    body: dict = {
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "systemInstruction": {"parts": [{"text": system_instruction.strip()}]},
+        "generationConfig": gen_cfg,
+    }
+    return _gemini_generate_text_with_retries(
+        api_key, model_id, body, debug_ctx=debug_ctx
+    )
+
+
+def generate_text_gemma4_custom(
+    user_message: str,
+    *,
+    system_instruction: str,
+    temperature: float = 0.2,
+    max_output_tokens: Optional[int] = None,
+    stop_sequences: Optional[List[str]] = None,
+    debug_ctx: str = "generate_text_gemma4_custom",
+) -> str:
+    """Single completion with full control over system prompt (RAG-first pipeline, tools, etc.).
+
+    Pass ``stop_sequences=[]`` to disable stop sequences (needed for JSON intent extraction).
+    """
+
+    key = _pick_google_api_key()
+    if not key:
+        raise InferenceConfigurationError(
+            "Set GEMINI_API_KEY or GOOGLE_API_KEY to call hosted Gemma 4."
+        )
+    mid = _default_gemma_hosted_model_id()
+    max_out = (
+        max_output_tokens
+        if max_output_tokens is not None
+        else _gemini_max_output_tokens()
+    )
+    text = _gemini_generate_custom(
+        key,
+        mid,
+        user_message.strip(),
+        system_instruction,
+        temperature,
+        max_out,
+        stop_sequences=stop_sequences,
+        debug_ctx=debug_ctx,
+    ).strip()
+    if not text:
+        raise RuntimeError("Gemma 4 returned empty text.")
+    return text
+
+
 def generate_text_gemma4(
     user_message: str,
     *,
@@ -1022,74 +1111,97 @@ class GeminiBackend:
         self.model_id = model_id
         self.name = "Gemma-4"
 
+    def _gemini_sample_index(
+        self, template: str, i: int, n: int, max_out: int
+    ) -> Candidate:
+        temps = [0.4, 0.55, 0.7, 0.85, 1.0, 1.1]
+        ctx = f"cand_{i}"
+        temperature = temps[i % len(temps)]
+        compile_progress(
+            f"gemma · candidate {i + 1}/{n} · API · T={temperature:g} · "
+            f"model={self.model_id!r}"
+        )
+        infer_debug_log(
+            f"{ctx} start T={temps[i % len(temps)]} thread={threading.current_thread().name!r}"
+        )
+        thought = ""
+        sequence = ""
+        text = ""
+        _retry_blocks = ("", _FORMAT_RETRY_SUFFIX, _FORMAT_RETRY_STRICT)
+        for attempt in range(3):
+            use_template = template + _retry_blocks[attempt]
+            if attempt > 0:
+                compile_progress(
+                    f"gemma · candidate {i + 1}/{n} · parse retry {attempt + 1}/3 · "
+                    "stricter format…"
+                )
+                infer_debug_log(f"{ctx} parse retry attempt {attempt + 1}")
+            t_c0 = time.perf_counter()
+            text = _gemini_generate_single(
+                self.api_key,
+                self.model_id,
+                use_template,
+                temperature,
+                max_out,
+                debug_ctx=ctx if attempt == 0 else f"{ctx}_retry",
+            )
+            infer_debug_log(
+                f"{ctx} raw received in {(time.perf_counter() - t_c0):.1f}s, parsing…"
+            )
+            compile_progress(
+                f"gemma · candidate {i + 1}/{n} · HTTP OK in "
+                f"{(time.perf_counter() - t_c0):.1f}s · parsing…"
+            )
+            try:
+                thought, sequence = parse_thought_and_sequence(text)
+                break
+            except ValueError as exc:
+                log_parse_failure(f"{ctx} attempt {attempt + 1}/3", text, exc)
+                if attempt < 2:
+                    continue
+                raise RuntimeError(
+                    f"Hosted Gemma output for candidate {i} is not parseable after 3 retries "
+                    "(expected `<|channel>thought … <channel|>` then a DNA string of A/C/G/T). "
+                    "See [dgene/infer] log lines above for the raw output that failed; "
+                    "set DGENE_MIN_PARSE_DNA_LEN=8 if the design is very short."
+                ) from exc
+        infer_debug_log(
+            f"{ctx} done seq_len={len(sequence)} thought_chars={len(thought)}"
+        )
+        thought_ui = sanitize_thought_for_display(thought)
+        return Candidate(
+            candidate_id=f"cand_{i}",
+            thought=thought_ui,
+            sequence=sequence,
+            strategy=f"T{temperature:g}",
+            strategy_name=f"Gemma hosted (T={temperature:g})",
+            raw=_canonical_raw(thought_ui, sequence),
+        )
+
+    def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
+        """Sequential samples in **candidate index order** (`cand_0`, then `cand_1`, …).
+
+        Used by async compile jobs so the UI can show variant 1 before later API calls finish.
+        Ignores ``DGENE_GEMINI_PARALLEL`` — always one HTTP round-trip at a time.
+        """
+
+        template = _gemini_prompt_template(prompt)
+        max_out = _gemini_max_output_tokens()
+        compile_progress(
+            f"gemma · hosted · {n} candidates · sequential (early UI) · "
+            f"max_out_tokens={max_out}"
+        )
+        infer_debug_log(f"GeminiBackend.generate_iter n={n} model={self.model_id!r}")
+        for i in range(n):
+            yield self._gemini_sample_index(template, i, n, max_out)
+        infer_debug_log("GeminiBackend.generate_iter finished")
+
     def generate(self, prompt: str, n: int = 4) -> List[Candidate]:
         template = _gemini_prompt_template(prompt)
         max_out = _gemini_max_output_tokens()
-        temps = [0.4, 0.55, 0.7, 0.85, 1.0, 1.1]
 
         def one(i: int) -> Candidate:
-            ctx = f"cand_{i}"
-            temperature = temps[i % len(temps)]
-            compile_progress(
-                f"gemma · candidate {i + 1}/{n} · API · T={temperature:g} · "
-                f"model={self.model_id!r}"
-            )
-            infer_debug_log(
-                f"{ctx} start T={temps[i % len(temps)]} thread={threading.current_thread().name!r}"
-            )
-            thought = ""
-            sequence = ""
-            text = ""
-            _retry_blocks = ("", _FORMAT_RETRY_SUFFIX, _FORMAT_RETRY_STRICT)
-            for attempt in range(3):
-                use_template = template + _retry_blocks[attempt]
-                if attempt > 0:
-                    compile_progress(
-                        f"gemma · candidate {i + 1}/{n} · parse retry {attempt + 1}/3 · "
-                        "stricter format…"
-                    )
-                    infer_debug_log(f"{ctx} parse retry attempt {attempt + 1}")
-                t_c0 = time.perf_counter()
-                text = _gemini_generate_single(
-                    self.api_key,
-                    self.model_id,
-                    use_template,
-                    temperature,
-                    max_out,
-                    debug_ctx=ctx if attempt == 0 else f"{ctx}_retry",
-                )
-                infer_debug_log(
-                    f"{ctx} raw received in {(time.perf_counter() - t_c0):.1f}s, parsing…"
-                )
-                compile_progress(
-                    f"gemma · candidate {i + 1}/{n} · HTTP OK in "
-                    f"{(time.perf_counter() - t_c0):.1f}s · parsing…"
-                )
-                try:
-                    thought, sequence = parse_thought_and_sequence(text)
-                    break
-                except ValueError as exc:
-                    log_parse_failure(f"{ctx} attempt {attempt + 1}/3", text, exc)
-                    if attempt < 2:
-                        continue
-                    raise RuntimeError(
-                        f"Hosted Gemma output for candidate {i} is not parseable after 3 retries "
-                        "(expected `<|channel>thought … <channel|>` then a DNA string of A/C/G/T). "
-                        "See [dgene/infer] log lines above for the raw output that failed; "
-                        "set DGENE_MIN_PARSE_DNA_LEN=8 if the design is very short."
-                    ) from exc
-            infer_debug_log(
-                f"{ctx} done seq_len={len(sequence)} thought_chars={len(thought)}"
-            )
-            thought_ui = sanitize_thought_for_display(thought)
-            return Candidate(
-                candidate_id=f"cand_{i}",
-                thought=thought_ui,
-                sequence=sequence,
-                strategy=f"T{temperature:g}",
-                strategy_name=f"Gemma hosted (T={temperature:g})",
-                raw=_canonical_raw(thought_ui, sequence),
-            )
+            return self._gemini_sample_index(template, i, n, max_out)
 
         parallel = _gemini_env_bool("DGENE_GEMINI_PARALLEL", True) and n > 1
         compile_progress(
@@ -1156,10 +1268,10 @@ class GGUFBackend:
             "<|channel>thought\n"
         )
 
-    def generate(self, prompt: str, n: int = 4) -> List[Candidate]:
+    def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
+        """Yield each local sample so async compile jobs can update the UI incrementally."""
+
         formatted = self._format_prompt(prompt)
-        out: List[Candidate] = []
-        # Temperature ladder for diversity across candidates.
         temps = [0.4, 0.7, 0.9, 1.1]
         compile_progress(f"gguf · local · {n} candidates · {self.gguf_filename}")
         for i in range(n):
@@ -1187,15 +1299,17 @@ class GGUFBackend:
                     "See [dgene/infer] log lines above for the raw output that failed."
                 ) from exc
             thought_ui = sanitize_thought_for_display(thought)
-            out.append(Candidate(
+            yield Candidate(
                 candidate_id=f"cand_{i}",
                 thought=thought_ui,
                 sequence=sequence,
                 strategy=f"sample_T{temps[i % len(temps)]}",
                 strategy_name=f"Gemma sample (T={temps[i % len(temps)]})",
                 raw=full,
-            ))
-        return out
+            )
+
+    def generate(self, prompt: str, n: int = 4) -> List[Candidate]:
+        return list(self.generate_iter(prompt, n))
 
 
 # ---------------------------------------------------------------------------

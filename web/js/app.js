@@ -93,6 +93,30 @@ const PLASMID_GEOM = {
 
 /** Build a feature ribbon path with an arrowhead at the strand-end.
  *  Coordinates are in the rotated plasmid space (origin at center). */
+/** Closed annulus sector (no arrowhead) — base ring under feature ribbons. */
+function plainAnnulusSectorPath(rIn, rOut, a0, a1) {
+  const sweep = a1 - a0;
+  if (sweep <= 1e-9) return "";
+  const large = sweep > Math.PI ? 1 : 0;
+  const c = Math.cos;
+  const s = Math.sin;
+  const x0o = rOut * c(a0);
+  const y0o = rOut * s(a0);
+  const x1o = rOut * c(a1);
+  const y1o = rOut * s(a1);
+  const x1i = rIn * c(a1);
+  const y1i = rIn * s(a1);
+  const x0i = rIn * c(a0);
+  const y0i = rIn * s(a0);
+  return [
+    `M ${x0o} ${y0o}`,
+    `A ${rOut} ${rOut} 0 ${large} 1 ${x1o} ${y1o}`,
+    `L ${x1i} ${y1i}`,
+    `A ${rIn} ${rIn} 0 ${large} 0 ${x0i} ${y0i}`,
+    "Z",
+  ].join(" ");
+}
+
 function featureArrowPath(rIn, rOut, a0, a1, strand) {
   if (a1 <= a0) return "";
   const sweep = a1 - a0;
@@ -184,43 +208,134 @@ function findRestrictionSites(sequence) {
 
 /** Default heuristic ribbon when no parsed parts are available from the backend. */
 const DEFAULT_FEATURE_CATALOG = [
-  { label: "J23100", sub: "promoter", pStart: 0.0, pEnd: 0.16, strand: +1, color: "#22c55e" },
-  { label: "lacO", sub: "operator", pStart: 0.16, pEnd: 0.23, strand: +1, color: "#f59e0b" },
-  { label: "B0034", sub: "rbs", pStart: 0.23, pEnd: 0.29, strand: +1, color: "#a855f7" },
-  { label: "sfGFP", sub: "cds", pStart: 0.29, pEnd: 0.86, strand: +1, color: "#0ea5e9" },
-  { label: "B0015", sub: "terminator", pStart: 0.86, pEnd: 1.0, strand: -1, color: "#ef4444" },
+  { label: "J23100", sub: "promoter", pStart: 0.0, pEnd: 0.16, strand: +1, color: "#16a34a" },
+  { label: "lacO", sub: "operator", pStart: 0.16, pEnd: 0.23, strand: +1, color: "#d97706" },
+  { label: "B0034", sub: "rbs", pStart: 0.23, pEnd: 0.29, strand: +1, color: "#9333ea" },
+  { label: "sfGFP", sub: "cds", pStart: 0.29, pEnd: 0.86, strand: +1, color: "#0284c7" },
+  { label: "B0015", sub: "terminator", pStart: 0.86, pEnd: 1.0, strand: -1, color: "#dc2626" },
 ];
 
 const SUB_COLOR = {
-  promoter: "#22c55e",
-  operator: "#f59e0b",
-  rbs: "#a855f7",
-  cds: "#0ea5e9",
-  terminator: "#ef4444",
+  promoter: "#16a34a",
+  operator: "#d97706",
+  rbs: "#9333ea",
+  cds: "#0284c7",
+  terminator: "#dc2626",
   feature: "#64748b",
+  backbone: "#475569",
 };
+
+/** Aligns with ``_part_type_to_map_sub`` in ``circuit_rag_first.py`` (iGEM registry strings). */
+function partTypeToMapSub(partType) {
+  const t = String(partType || "").trim().toLowerCase();
+  if (!t) return "";
+  if (t.includes("promoter")) return "promoter";
+  if (t.includes("terminator")) return "terminator";
+  if (t.includes("rbs") || t.includes("ribosome")) return "rbs";
+  if (t === "cds" || t.includes("coding") || t.includes("protein domain") || t === "orf") return "cds";
+  if (t.includes("operator")) return "operator";
+  if (t.includes("origin")) return "backbone";
+  return "";
+}
+
+function normalizeMapSlotsForPlasmid(mapSlots) {
+  if (!Array.isArray(mapSlots) || !mapSlots.length) return null;
+  const drawn = mapSlots.filter((s) => s && s.ok !== false);
+  return drawn.length ? drawn : mapSlots;
+}
+
+function mergeBpIntervals(intervals) {
+  if (!intervals.length) return [];
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  const out = [{ start: sorted[0].start, end: sorted[0].end }];
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i];
+    const last = out[out.length - 1];
+    if (cur.start <= last.end + 1) last.end = Math.max(last.end, cur.end);
+    else out.push({ start: cur.start, end: cur.end });
+  }
+  return out;
+}
+
+/** Linear [1..L] bp not covered by merged intervals (for circular plasmid map). */
+function backboneGapIntervals(L, merged) {
+  if (!L || L < 1) return [];
+  if (!merged.length) return [{ start: 1, end: L }];
+  const gaps = [];
+  let expect = 1;
+  for (const intv of merged) {
+    const s = intv.start;
+    const e = intv.end;
+    if (s > expect) gaps.push({ start: expect, end: s - 1 });
+    expect = Math.max(expect, e + 1);
+  }
+  if (expect <= L) gaps.push({ start: expect, end: L });
+  return gaps;
+}
+
+function backboneGapFeatures(L, gaps) {
+  return gaps.map((g) => ({
+    label: "Backbone · unannotated",
+    sub: "backbone",
+    pStart: (g.start - 1) / L,
+    pEnd: g.end / L,
+    strand: +1,
+    color: SUB_COLOR.backbone,
+    start: g.start,
+    end: g.end,
+    unverified: false,
+    coordSuspect: false,
+    isBackboneGap: true,
+  }));
+}
 
 /** Feature arcs for the plasmid map: parsed ``map_slots`` from the model when present,
  *  otherwise a generic catalog (historical demo layout). */
 function inferFeatures(L, mapSlots) {
-  const slots = Array.isArray(mapSlots) && mapSlots.length ? mapSlots : null;
+  const slots = normalizeMapSlotsForPlasmid(mapSlots);
   if (slots) {
     const n = slots.length;
-    const out = [];
+    const raw = [];
     for (let i = 0; i < n; i++) {
       const s = slots[i] || {};
-      const sub = String(s.sub || "feature").toLowerCase();
-      const label = String(s.label || "part").trim() || "part";
-      const pStart = i / n;
-      const pEnd = (i + 1) / n;
+      const fromRegistryType = partTypeToMapSub(s.part_type);
+      let sub = String(s.sub || "").toLowerCase();
+      if (!sub || sub === "feature") {
+        sub = fromRegistryType || sub || "feature";
+      }
+      const label =
+        String(s.label || s.part_name || s.normalized_name || "part").trim() || "part";
       const strand = sub === "terminator" ? -1 : +1;
       const color = SUB_COLOR[sub] || SUB_COLOR.feature;
-      const start = Math.max(1, Math.round(pStart * L) + (pStart === 0 ? 0 : 1));
-      const end = Math.max(start + 1, Math.round(pEnd * L));
+      let start;
+      let end;
+      const sb = s.start_bp != null ? Number(s.start_bp) : NaN;
+      const eb = s.end_bp != null ? Number(s.end_bp) : NaN;
+      if (Number.isFinite(sb) && Number.isFinite(eb) && eb >= sb && sb >= 1) {
+        start = Math.max(1, Math.min(L, Math.round(sb)));
+        end = Math.max(1, Math.min(L, Math.round(eb)));
+        if (end < start) continue;
+      } else {
+        const pStart = i / n;
+        const pEnd = (i + 1) / n;
+        start = Math.max(1, Math.round(pStart * L) + (pStart === 0 ? 0 : 1));
+        end = Math.max(start, Math.round(pEnd * L));
+      }
+      const pStart = (start - 1) / L;
+      const pEnd = end / L;
       const unverified = s.verified === false;
-      out.push({ label, sub, pStart, pEnd, strand, color, start, end, unverified });
+      const span = end - start + 1;
+      const coordSuspect =
+        sub !== "cds" &&
+        sub !== "backbone" &&
+        span > Math.max(120, L * 0.42);
+      raw.push({ label, sub, pStart, pEnd, strand, color, start, end, unverified, coordSuspect });
     }
-    return out;
+    raw.sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged = mergeBpIntervals(raw.map((f) => ({ start: f.start, end: f.end })));
+    const gaps = backboneGapIntervals(L, merged);
+    const underlay = backboneGapFeatures(L, gaps);
+    return [...underlay, ...raw];
   }
   return DEFAULT_FEATURE_CATALOG.map((f) => {
     const start = Math.max(1, Math.round(f.pStart * L) + (f.pStart === 0 ? 0 : 1));
@@ -230,7 +345,9 @@ function inferFeatures(L, mapSlots) {
 }
 
 function bpToAngle(bp, L) {
-  return (2 * Math.PI * bp) / L;
+  if (!L || L < 1) return 0;
+  const b = Math.max(0, Math.min(L, Number(bp) || 0));
+  return (2 * Math.PI * b) / L;
 }
 
 /** Convert (radius, bp) in unrotated viewport space (with -90deg offset so 0 bp is at top). */
@@ -279,48 +396,80 @@ function renderRestrictionSites(sites, L, sequence, tip, frame) {
   const g = $("plasmidSites");
   const seq = String(sequence || "");
   g.innerHTML = "";
-  for (const site of sites) {
-    const a = site.position;
+  const clusters = clusterRestrictionSitesForLabels(sites);
+  const MIN_ANGLE_SEP = 0.1;
+  const R_EXTRA_STEP = 16;
+  const placed = [];
+
+  const sortedClusters = [...clusters].sort((a, b) => a.labelBp - b.labelBp);
+
+  for (const cl of sortedClusters) {
+    const a = cl.labelBp;
+    const angleUnwrapped = bpToAngle(a, L);
+    let tier = 0;
+    while (placed.some((p) => p.tier === tier && angleDistRad(angleUnwrapped, p.angleRad) < MIN_ANGLE_SEP)) {
+      tier++;
+    }
+    placed.push({ angleRad: angleUnwrapped, tier });
+
+    const rLabel = PLASMID_GEOM.rSiteLabel + tier * R_EXTRA_STEP;
     const p0 = polarToXY(PLASMID_GEOM.rSiteTickInner, a, L);
-    const p1 = polarToXY(PLASMID_GEOM.rSiteTickOuter, a, L);
-    const lp = polarToXY(PLASMID_GEOM.rSiteLabel, a, L);
+    const p1 = polarToXY(PLASMID_GEOM.rSiteTickOuter + tier * 6, a, L);
+    const lp = polarToXY(rLabel, a, L);
+
     g.appendChild(svgEl("line", {
       x1: p0.x, y1: p0.y, x2: p1.x, y2: p1.y, class: "plasmid-site-tick",
     }));
-    const angle = bpToAngle(a, L) - Math.PI / 2;
+
+    const angle = angleUnwrapped - Math.PI / 2;
     const deg = (angle * 180) / Math.PI;
     const rotateDeg = deg > 90 || deg < -90 ? deg + 180 : deg;
     const anchor = deg > 90 || deg < -90 ? "end" : "start";
+    const posStr = cl.posLo === cl.posHi ? String(cl.posLo) : `${cl.posLo}–${cl.posHi}`;
+    const labelNames = cl.names.join(" · ");
+
     const txt = svgEl("text", {
-      x: lp.x, y: lp.y,
+      x: lp.x,
+      y: lp.y,
       transform: `rotate(${rotateDeg} ${lp.x} ${lp.y})`,
       "text-anchor": anchor,
       "dominant-baseline": "middle",
       class: "plasmid-site-label plasmid-site-hit",
     });
-    txt.textContent = `${site.name} (${site.position})`;
-    const motif = ENZYMES[site.name] || "";
-    const siteSeg = motif && seq.length
-      ? plasmidSegmentSeq(seq, site.position, site.position + motif.length - 1)
-      : "";
+    txt.textContent = `${labelNames} (${posStr})`;
+
+    function tooltipHtmlForCluster() {
+      const blocks = [];
+      for (const site of cl.sites) {
+        const motif = ENZYMES[site.name] || "";
+        const siteSeg =
+          motif && seq.length ? plasmidSegmentSeq(seq, site.position, site.position + motif.length - 1) : "";
+        if (motif && siteSeg) {
+          const prev = formatSeqTooltipPreview(siteSeg, 120);
+          const safeSeqAttr = escapeHtml(siteSeg);
+          blocks.push(
+            `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
+              `site · ${site.position} bp · ${escapeHtml(motif)} (5′→3′)</div>` +
+              `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
+              `<button type="button" class="feature-tooltip-copy" data-copy-seq="${safeSeqAttr}">` +
+              `<span class="feature-tooltip-copy-label">Copy</span> site</button>`,
+          );
+        } else {
+          blocks.push(
+            `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
+              `cut site · ${site.position} bp</div>`,
+          );
+        }
+      }
+      return blocks.join("");
+    }
+
     txt.addEventListener("mouseenter", (ev) => {
       cancelPlasmidTipHide();
       txt.classList.add("is-active");
       tip.classList.add("tooltip--rich");
       tip.hidden = false;
-      if (motif && siteSeg) {
-        const prev = formatSeqTooltipPreview(siteSeg, 120);
-        tip.innerHTML =
-          `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
-          `site · ${site.position} bp · ${escapeHtml(motif)} (5′→3′ on top strand)</div>` +
-          `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
-          `<button type="button" class="feature-tooltip-copy" data-copy-seq="${escapeHtml(siteSeg)}">` +
-          `<span class="feature-tooltip-copy-label">Copy</span> site</button>`;
-      } else {
-        tip.innerHTML =
-          `<div class="feature-tooltip-head"><strong>${escapeHtml(site.name)}</strong><br/>` +
-          `cut site · ${site.position} bp</div>`;
-      }
+      tip.innerHTML = tooltipHtmlForCluster();
       moveTooltipAt(tip, frame, ev);
     });
     txt.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
@@ -416,9 +565,12 @@ function buildFeatureTooltipHtml(f, subHuman, seg) {
   const unvNote = f.unverified
     ? `<br/><span class="feature-tooltip-note">* Sequence not verified (iGEM / NCBI); model or low-confidence DNA.</span>`
     : "";
+  const coordNote = f.coordSuspect
+    ? `<br/><span class="feature-tooltip-note">Fragment span looks unusually wide for this part type; <code>map_slots</code> coordinates may need review.</span>`
+    : "";
   return (
     `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
-    `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}</div>` +
+    `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}${coordNote}</div>` +
     `<pre class="feature-tooltip-seq">${escapeHtml(prev)}</pre>` +
     `<button type="button" class="feature-tooltip-copy" data-copy-seq="${safeSegAttr}">` +
     `<span class="feature-tooltip-copy-label">Copy</span> segment</button>`
@@ -429,7 +581,87 @@ function humanizeFeatureSub(sub) {
   const s = String(sub || "feature").toLowerCase();
   if (s === "rbs") return "RBS";
   if (s === "cds") return "CDS";
+  if (s === "backbone") return "Backbone";
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Shortest angular distance on the circle (radians). */
+function angleDistRad(a, b) {
+  let d = Math.abs(a - b) % (2 * Math.PI);
+  if (d > Math.PI) d = 2 * Math.PI - d;
+  return d;
+}
+
+/** Vertically stack labels that share the same side so two-line blocks do not overlap. */
+function packPlasmidFeatureLabelYs(rows, yMin, yMax) {
+  if (!rows.length) return;
+  rows.sort((x, y) => x.idealY - y.idealY);
+  const range = Math.max(1, yMax - yMin);
+  let sep = 21;
+  const minSep = 13;
+  const need = (rows.length - 1) * sep;
+  if (need > range * 0.92 && rows.length > 1) {
+    sep = Math.max(minSep, Math.floor((range * 0.92) / (rows.length - 1)));
+  }
+  const ys = rows.map((r) => r.idealY);
+  for (let i = 1; i < ys.length; i++) {
+    ys[i] = Math.max(ys[i], ys[i - 1] + sep);
+  }
+  let shift = 0;
+  if (ys[ys.length - 1] > yMax) shift -= ys[ys.length - 1] - yMax;
+  if (ys[0] + shift < yMin) shift += yMin - (ys[0] + shift);
+  for (let i = 0; i < ys.length; i++) {
+    rows[i].packedY = ys[i] + shift;
+  }
+  for (let rep = 0; rep < 6; rep++) {
+    let moved = false;
+    if (rows[0].packedY < yMin) {
+      const d = yMin - rows[0].packedY;
+      for (const r of rows) r.packedY += d;
+      moved = true;
+    }
+    if (rows[rows.length - 1].packedY > yMax) {
+      const d = rows[rows.length - 1].packedY - yMax;
+      for (const r of rows) r.packedY -= d;
+      moved = true;
+    }
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].packedY < rows[i - 1].packedY + sep) {
+        rows[i].packedY = rows[i - 1].packedY + sep;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+/** Merge restriction sites that are adjacent on the sequence map so labels are not duplicated on top of each other. */
+function clusterRestrictionSitesForLabels(sites, bpMerge = 32) {
+  if (!sites.length) return [];
+  const sorted = [...sites].sort((a, b) => a.position - b.position);
+  const clusters = [];
+  let cur = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].position - cur[cur.length - 1].position <= bpMerge) cur.push(sorted[i]);
+    else {
+      clusters.push(cur);
+      cur = [sorted[i]];
+    }
+  }
+  clusters.push(cur);
+  return clusters.map((c) => {
+    const positions = c.map((s) => s.position);
+    const lo = Math.min(...positions);
+    const hi = Math.max(...positions);
+    const labelBp = Math.round(positions.reduce((a, p) => a + p, 0) / positions.length);
+    return {
+      sites: c,
+      names: [...new Set(c.map((s) => s.name))],
+      labelBp,
+      posLo: lo,
+      posHi: hi,
+    };
+  });
 }
 
 function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
@@ -441,16 +673,51 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
 
   const { rFeatureInner: rIn, rFeatureOuter: rOut } = PLASMID_GEOM;
 
+  const trackEps = 1e-4;
+  const dTrack = plainAnnulusSectorPath(rIn, rOut, 0, 2 * Math.PI - trackEps);
+  if (dTrack) {
+    arcs.appendChild(svgEl("path", {
+      d: dTrack,
+      class: "plasmid-track-base",
+      fill: "#e4e9f2",
+    }));
+  }
+
+  const labelRows = [];
+  const Y_PACK_MIN = 36;
+  const Y_PACK_MAX = 564;
+
   for (const f of features) {
     const a0 = bpToAngle(f.start - 1, L);
     const a1 = bpToAngle(f.end, L);
     if (a1 <= a0) continue;
 
-    const d = featureArrowPath(rIn, rOut, a0, a1, f.strand);
+    const usePlainArc = f.sub === "terminator";
+    const d = usePlainArc
+      ? plainAnnulusSectorPath(rIn, rOut, a0, a1)
+      : featureArrowPath(rIn, rOut, a0, a1, f.strand);
+    if (!d) continue;
     const path = svgEl("path", {
-      d, fill: f.color, class: "plasmid-seg",
+      d,
+      fill: f.color,
+      class: f.isBackboneGap ? "plasmid-seg plasmid-seg--gap" : "plasmid-seg",
     });
     arcs.appendChild(path);
+
+    if (f.isBackboneGap) {
+      path.addEventListener("mouseenter", (ev) => {
+        cancelPlasmidTipHide();
+        tip.classList.remove("tooltip--rich");
+        tip.hidden = false;
+        tip.innerHTML =
+          `<div class="feature-tooltip-head"><strong>Unannotated region</strong><br/>` +
+          `${f.start}–${f.end} bp · no <code>map_slots</code> entry (backbone / linker).</div>`;
+        moveTooltipAt(tip, frame, ev);
+      });
+      path.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
+      path.addEventListener("mouseleave", () => schedulePlasmidTipHide(tip));
+      continue;
+    }
 
     const midBp = (f.start - 1 + f.end) / 2;
     const midA = bpToAngle(midBp, L) - Math.PI / 2;
@@ -459,17 +726,40 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
     const pStart = polarToXY(PLASMID_GEOM.rLeaderInner, midBp, L);
     const pElbow = polarToXY(PLASMID_GEOM.rLeaderElbow, midBp, L);
     const labelX = onRight ? PLASMID_GEOM.cx + PLASMID_GEOM.rLeaderTextX : PLASMID_GEOM.cx - PLASMID_GEOM.rLeaderTextX;
-    const pText = { x: labelX, y: pElbow.y };
+
+    labelRows.push({
+      f,
+      path,
+      midBp,
+      onRight,
+      pStart,
+      pElbow,
+      labelX,
+      idealY: pElbow.y,
+      packedY: pElbow.y,
+    });
+  }
+
+  const rightRows = labelRows.filter((r) => r.onRight);
+  const leftRows = labelRows.filter((r) => !r.onRight);
+  packPlasmidFeatureLabelYs(rightRows, Y_PACK_MIN, Y_PACK_MAX);
+  packPlasmidFeatureLabelYs(leftRows, Y_PACK_MIN, Y_PACK_MAX);
+
+  for (const row of labelRows) {
+    const { f, path } = row;
+    const pText = { x: row.labelX, y: row.packedY };
 
     labels.appendChild(svgEl("path", {
-      d: `M ${pStart.x} ${pStart.y} L ${pElbow.x} ${pElbow.y} L ${pText.x} ${pText.y}`,
+      d: `M ${row.pStart.x} ${row.pStart.y} L ${row.pElbow.x} ${row.pElbow.y} L ${pText.x} ${pText.y}`,
       class: "plasmid-leader",
     }));
 
+    const onRight = row.onRight;
     const anchor = onRight ? "start" : "end";
     const dx = onRight ? 4 : -4;
     const tName = svgEl("text", {
-      x: pText.x + dx, y: pText.y - 2,
+      x: pText.x + dx,
+      y: pText.y - 2,
       "text-anchor": anchor,
       class: "plasmid-feature-label plasmid-feature-hit",
     });
@@ -485,12 +775,13 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
     labels.appendChild(tName);
 
     const tSub = svgEl("text", {
-      x: pText.x + dx, y: pText.y + 12,
+      x: pText.x + dx,
+      y: pText.y + 12,
       "text-anchor": anchor,
       class: "plasmid-feature-sub plasmid-feature-hit",
     });
     const subHuman = humanizeFeatureSub(f.sub);
-    tSub.textContent = `${subHuman} · ${f.start}–${f.end}`;
+    tSub.textContent = `${subHuman} · ${f.start}–${f.end}${f.coordSuspect ? " · coords?" : ""}`;
     labels.appendChild(tSub);
 
     const seg = plasmidSegmentSeq(seq, f.start, f.end);
@@ -505,16 +796,18 @@ function renderFeaturesAndLabels(features, L, sequence, tip, frame) {
       const unvNote = f.unverified
         ? `<br/><span class="feature-tooltip-note">* Sequence not verified (iGEM / NCBI); model or low-confidence DNA.</span>`
         : "";
+      const coordNote = f.coordSuspect
+        ? `<br/><span class="feature-tooltip-note">Unusually wide span for this part type — verify <code>map_slots</code> coordinates.</span>`
+        : "";
       tip.innerHTML = showSeq
         ? buildFeatureTooltipHtml(f, subHuman, seg)
         : `<div class="feature-tooltip-head"><strong>${escapeHtml(f.label)}</strong> · ${escapeHtml(subHuman)}<br/>` +
-          `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}<br/>` +
+          `${f.start}–${f.end} bp · ${f.strand >= 0 ? "+" : "−"} strand${unvNote}${coordNote}<br/>` +
           `<span class="feature-tooltip-note">No sequence loaded for this map.</span></div>`;
       moveTooltipAt(tip, frame, ev);
     };
 
-    const onPathEnter = (ev) => showTip(ev);
-    path.addEventListener("mouseenter", onPathEnter);
+    path.addEventListener("mouseenter", (ev) => showTip(ev));
     path.addEventListener("mousemove", (ev) => moveTooltipAt(tip, frame, ev));
     path.addEventListener("mouseleave", () => {
       path.classList.remove("is-active");
@@ -559,11 +852,21 @@ function renderPlasmid(sequence, name = "construct", mapSlots = null) {
   renderRestrictionSites(sites, L, sequence, tip, frame);
 }
 
+/** Zoom/pan the plasmid: use document-capture wheel + pointer handlers so parent ``.artifact-body``
+ *  scroll containers do not eat trackpad/mouse wheel, and pan keeps working when the cursor leaves
+ *  the frame mid-drag. Shift+wheel does not zoom (page scroll). */
+let plasmidNavDocBound = false;
 function attachPlasmidNav(svg, viewport) {
+  if (!svg || !viewport || plasmidNavDocBound) return;
+  plasmidNavDocBound = true;
+  const frame = $("vizFrame") || svg.parentElement;
+  if (!frame) return;
+
   let scale = 1;
   let tx = 0;
   let ty = 0;
   let dragging = false;
+  let activePointerId = null;
   let lx = 0;
   let ly = 0;
   const cx = PLASMID_GEOM.cx;
@@ -576,35 +879,73 @@ function attachPlasmidNav(svg, viewport) {
     );
   }
 
-  svg.addEventListener(
-    "wheel",
-    (e) => {
-      // Only zoom on Cmd/Ctrl+scroll so normal page scrolling still works.
-      if (!(e.metaKey || e.ctrlKey)) return;
-      e.preventDefault();
-      const factor = Math.exp(-e.deltaY * 0.0015);
-      scale = Math.min(4, Math.max(0.55, scale * factor));
-      apply();
-    },
-    { passive: false }
-  );
+  function onWheel(e) {
+    if (!frame.contains(e.target)) return;
+    if (e.shiftKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const factor = Math.exp(-e.deltaY * 0.0015);
+    scale = Math.min(4, Math.max(0.55, scale * factor));
+    apply();
+  }
 
-  svg.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
+  document.addEventListener("wheel", onWheel, { passive: false, capture: true });
+
+  function onPointerDown(e) {
+    if (!frame.contains(e.target)) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const root = e.target;
+    if (root && typeof root.closest === "function") {
+      if (root.closest("#featureTooltip")) return;
+      if (root.closest(".feature-tooltip-copy")) return;
+    }
     dragging = true;
+    activePointerId = e.pointerId;
+    try {
+      frame.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
     lx = e.clientX;
     ly = e.clientY;
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
+  }
+
+  function onPointerMove(e) {
+    if (!dragging || e.pointerId !== activePointerId) return;
     tx += e.clientX - lx;
     ty += e.clientY - ly;
     lx = e.clientX;
     ly = e.clientY;
     apply();
-  });
-  window.addEventListener("mouseup", () => {
+  }
+
+  function endPan(e) {
+    if (!dragging || e.pointerId !== activePointerId) return;
     dragging = false;
+    activePointerId = null;
+    try {
+      frame.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  document.addEventListener("pointerdown", onPointerDown, { capture: true });
+  document.addEventListener("pointermove", onPointerMove, { capture: true });
+  document.addEventListener("pointerup", endPan, { capture: true });
+  document.addEventListener("pointercancel", endPan, { capture: true });
+  frame.addEventListener("lostpointercapture", () => {
+    dragging = false;
+    activePointerId = null;
+  });
+
+  frame.addEventListener("dblclick", (e) => {
+    if (!frame.contains(e.target)) return;
+    e.preventDefault();
+    scale = 1;
+    tx = 0;
+    ty = 0;
+    apply();
   });
 }
 
@@ -655,6 +996,14 @@ function showLanding() {
   const ragEl0 = $("ragCard");
   if (ragEl0) ragEl0.hidden = true;
   $("passesCard").hidden = true;
+  const expertQaReset = $("expertQaCard");
+  if (expertQaReset) {
+    expertQaReset.hidden = true;
+    const eqb = $("expertQaBody");
+    const eqm = $("expertQaMeta");
+    if (eqb) eqb.innerHTML = "";
+    if (eqm) eqm.textContent = "";
+  }
   $("candidatesCard").hidden = true;
   $("paretoSection").hidden = true;
   $("passesList").innerHTML = "";
@@ -668,7 +1017,10 @@ function showLanding() {
   $("mTm").textContent = "—";
   state.candidates = [];
   state.selectedId = null;
+  state.snapshotIdForBar = null;
   lastSequence = "";
+  clearSnapshotFromUrl();
+  updateSnapshotBar(null);
 }
 
 function setModelLabel(model) {
@@ -723,9 +1075,228 @@ let lastSequence = "";
 const state = {
   candidates: [],
   selectedId: null,
+  /** Set after successful compile or snapshot restore; drives “Copy link” + URL query. */
+  snapshotIdForBar: null,
 };
 
+/** 32-char hex ids written by ``server.save_compile_snapshot``. */
+const SNAPSHOT_ID_RE = /^[0-9a-f]{32}$/;
+
+function buildSnapshotPageUrl(snapshotId) {
+  const u = new URL(window.location.href);
+  u.searchParams.set("snapshot", snapshotId);
+  const q = u.searchParams.toString();
+  return `${u.pathname}?${q}`;
+}
+
+function replaceUrlWithSnapshot(snapshotId) {
+  if (!snapshotId || !SNAPSHOT_ID_RE.test(snapshotId)) return;
+  history.replaceState({ snapshot: snapshotId }, "", buildSnapshotPageUrl(snapshotId));
+}
+
+function clearSnapshotFromUrl() {
+  const u = new URL(window.location.href);
+  if (!u.searchParams.has("snapshot")) return;
+  u.searchParams.delete("snapshot");
+  const q = u.searchParams.toString();
+  history.replaceState({}, "", u.pathname + (q ? `?${q}` : ""));
+}
+
+function updateSnapshotBar(snapshotId) {
+  const bar = $("snapshotBar");
+  const fb = $("snapshotCopyFeedback");
+  const show = snapshotId && SNAPSHOT_ID_RE.test(snapshotId);
+  if (bar) bar.hidden = !show;
+  if (fb) fb.textContent = "";
+}
+
+/** Paint workspace from a compile API / snapshot GET payload (no compile pipeline). */
+function applyCompileResultPayload(data) {
+  lastPartialPassesSig = null;
+  passFixState.spinningPassId = null;
+  passFixState.lastFix = null;
+  setModelLabel(data.model);
+  state.candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  if (!state.candidates.length) throw new Error("No candidates in snapshot");
+
+  state.selectedId = data.best_id || state.candidates[0].id;
+  const best = getCandidate(state.selectedId);
+  if (!best) throw new Error("best candidate missing");
+
+  const promptVal = typeof data.prompt === "string" ? data.prompt : "";
+  if ($("prompt")) $("prompt").value = promptVal;
+  $("userBubbleText").textContent = promptVal;
+  $("userBubble").hidden = false;
+
+  const extrasMeta = document.getElementById("extrasMeta");
+  if (extrasMeta) {
+    const paretoCount = state.candidates.filter((c) => c.is_pareto).length;
+    extrasMeta.textContent = `${state.candidates.length} candidates · ${paretoCount}★ · ${data.model || ""}`;
+  }
+
+  const seq = cleanSeq(best.sequence);
+  lastSequence = seq;
+  const mapSlots = best.rag && Array.isArray(best.rag.map_slots) ? best.rag.map_slots : null;
+  renderPlasmid(seq, best.strategy || "compiled_construct", mapSlots);
+  $("mLen").textContent = `${seq.length} bp`;
+  $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
+  const cai = passMetricFor(best.passes, "cai");
+  $("mTm").textContent = cai ? `CAI ${cai}` : `${wallaceTm(seq).toFixed(0)} °C`;
+  $("seqPre").textContent = seq;
+
+  renderPasses(best.passes, { animate: false });
+  renderCandidates(state.candidates, state.selectedId);
+  renderParetoChart(state.candidates, state.selectedId);
+  renderRagPanel(best.rag);
+  renderExpertQa(best.rag);
+
+  $("thoughtText").textContent = best.thought || "";
+  $("streamBadge").textContent = "Restored";
+  $("streamBadge").classList.add("done");
+
+  $("metrics").hidden = false;
+  $("seqCard").hidden = false;
+  $("ragCard").hidden = false;
+  $("passesCard").hidden = false;
+  $("candidatesCard").hidden = false;
+  $("paretoSection").hidden = false;
+}
+
+/**
+ * Applies a `/api/compile` job `result` (partial or final) to the workspace maps/lists.
+ */
+function paintLiveCompileWorkspace(data, { partial = false, animatePasses = true } = {}) {
+  setModelLabel(data.model);
+  const incoming = Array.isArray(data.candidates) ? data.candidates : [];
+  if (!incoming.length) return;
+
+  const prevSelected = state.selectedId;
+  state.candidates = incoming;
+  const idSet = new Set(state.candidates.map((c) => c.id));
+
+  let chosen = prevSelected && idSet.has(prevSelected) ? prevSelected : null;
+  if (!chosen) {
+    const bid = data.best_id;
+    chosen = bid && idSet.has(bid) ? bid : state.candidates[0].id;
+  }
+  state.selectedId = chosen;
+
+  const best = getCandidate(state.selectedId);
+  if (!best) return;
+
+  const extrasMeta = document.getElementById("extrasMeta");
+  if (extrasMeta) {
+    const paretoCount = state.candidates.filter((c) => c.is_pareto).length;
+    if (
+      partial &&
+      data.variants_ready != null &&
+      data.variants_total != null &&
+      data.variants_total > 0
+    ) {
+      extrasMeta.textContent = `${data.variants_ready}/${data.variants_total} variants ready · ${paretoCount}★ · ${data.model}`;
+    } else {
+      extrasMeta.textContent = `${state.candidates.length} candidates · ${paretoCount}★ · ${data.model}`;
+    }
+  }
+
+  const seq = cleanSeq(best.sequence);
+  lastSequence = seq;
+  const mapSlots = best.rag && Array.isArray(best.rag.map_slots) ? best.rag.map_slots : null;
+  renderPlasmid(seq, best.strategy || "compiled_construct", mapSlots);
+  $("mLen").textContent = `${seq.length} bp`;
+  $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
+  const cai = passMetricFor(best.passes, "cai");
+  $("mTm").textContent = cai ? `CAI ${cai}` : `${wallaceTm(seq).toFixed(0)} °C`;
+  $("seqPre").textContent = seq;
+
+  const passSig = `${state.selectedId}:${JSON.stringify(best.passes)}`;
+  let skipPassesRender = false;
+  if (partial) {
+    if (passSig === lastPartialPassesSig) skipPassesRender = true;
+    else lastPartialPassesSig = passSig;
+  } else {
+    lastPartialPassesSig = null;
+  }
+  if (!skipPassesRender) {
+    renderPasses(best.passes, { animate: animatePasses });
+  }
+  renderCandidates(state.candidates, state.selectedId);
+  renderParetoChart(state.candidates, state.selectedId);
+  renderRagPanel(best.rag);
+  renderExpertQa(best.rag);
+
+  $("thoughtText").textContent = best.thought || "";
+
+  $("metrics").hidden = false;
+  $("seqCard").hidden = false;
+  const ragEl = $("ragCard");
+  if (ragEl) ragEl.hidden = false;
+  $("passesCard").hidden = false;
+  $("candidatesCard").hidden = false;
+  $("paretoSection").hidden = false;
+}
+
+async function maybeRestoreCompileSnapshot() {
+  let id = new URLSearchParams(window.location.search).get("snapshot");
+  id = id ? String(id).trim().toLowerCase() : "";
+  if (!SNAPSHOT_ID_RE.test(id)) return;
+
+  try {
+    const res = await fetch(`/api/snapshot?id=${encodeURIComponent(id)}`);
+    let payload = {};
+    try {
+      payload = await res.json();
+    } catch {
+      payload = {};
+    }
+    if (!res.ok) {
+      const hint = $("statusHint");
+      if (hint) {
+        if (res.status === 404)
+          hint.textContent = "Saved link not found (new server folder or snapshots cleared).";
+        else if (res.status === 503) hint.textContent = "Design snapshots disabled on server.";
+        else hint.textContent = payload.error ? String(payload.error) : "Could not restore design.";
+      }
+      clearSnapshotFromUrl();
+      return;
+    }
+
+    showWorkspace();
+    stopCompilePipelineVisual();
+    applyCompileResultPayload(payload);
+
+    const sid = payload.snapshot_id || id;
+    state.snapshotIdForBar = sid;
+    updateSnapshotBar(sid);
+    replaceUrlWithSnapshot(sid);
+
+    $("statusHint").textContent = `Opened saved design (${state.candidates.length} variants)`;
+  } catch (e) {
+    console.error(e);
+    const hint = $("statusHint");
+    if (hint) hint.textContent = "Network error loading saved design.";
+    clearSnapshotFromUrl();
+  }
+}
+
+async function bootstrapApp() {
+  await refreshBackendMeta();
+  await maybeRestoreCompileSnapshot();
+}
+
 const PASS_GLYPH = { ok: "✓", warn: "!", error: "✕" };
+
+/** Pass IDs that support targeted /api/fix (fix_type matches pass_id). */
+const PASS_FIX_TYPES = new Set(["repeats", "type_iis", "cai", "rbs"]);
+
+const passFixState = {
+  spinningPassId: null,
+  /** Set after a successful fix while viewing `newCandidateId`; cleared on other selection. */
+  lastFix: null,
+};
+
+/** Skip redundant partial pass repaints (stops COMPILER PASSES flicker while variants stream). */
+let lastPartialPassesSig = null;
 
 function getCandidate(id) {
   return state.candidates.find((c) => c.id === id) || null;
@@ -741,6 +1312,14 @@ function renderPasses(passes, { animate } = { animate: false }) {
   const list = $("passesList");
   list.innerHTML = "";
 
+  const lastFix = passFixState.lastFix;
+  const spinPid = passFixState.spinningPassId;
+  const selectedCand = getCandidate(state.selectedId);
+  const showFixOutcome =
+    lastFix &&
+    selectedCand &&
+    selectedCand.id === lastFix.newCandidateId;
+
   const counts = passes.reduce(
     (acc, p) => ((acc[p.status] = (acc[p.status] || 0) + 1), acc),
     {}
@@ -750,19 +1329,64 @@ function renderPasses(passes, { animate } = { animate: false }) {
     `${passes.length} passes · ${(counts.ok || 0)}✓ ${(counts.warn || 0)}! ${(counts.error || 0)}✕ · ${totalMs.toFixed(1)} ms`;
 
   passes.forEach((p, i) => {
+    let displayStatus = p.status;
+    let displaySummary = p.summary || p.name || "";
+    let glyph = PASS_GLYPH[p.status] || "·";
+
+    const fixOverride =
+      showFixOutcome && lastFix.passId === p.pass_id ? lastFix : null;
+    if (fixOverride) {
+      if (fixOverride.stillFlagged) {
+        displayStatus = "warn";
+        displaySummary = "Fix attempted — still flagged";
+        glyph = PASS_GLYPH.warn;
+      } else if (fixOverride.passCleared) {
+        displayStatus = "ok";
+        displaySummary = `Fixed in candidate #${fixOverride.candNum}`;
+        glyph = PASS_GLYPH.ok;
+      } else {
+        displayStatus = "ok";
+        displaySummary = `Improved in candidate #${fixOverride.candNum} — pass may still warn`;
+        glyph = PASS_GLYPH.ok;
+      }
+    }
+
     const li = document.createElement("li");
     li.className = "pass-row";
-    li.dataset.status = p.status;
+    if (!animate) li.classList.add("pass-row--static");
+    li.dataset.status = displayStatus;
     li.style.animationDelay = animate ? `${i * 90}ms` : "0ms";
 
+    let fixCellInner = "";
+    if (spinPid === p.pass_id) {
+      fixCellInner =
+        '<span class="pass-fix-spinner" role="status" aria-label="Fix running"></span>';
+    } else if (
+      p.status === "warn" &&
+      PASS_FIX_TYPES.has(p.pass_id) &&
+      !(fixOverride && fixOverride.passCleared)
+    ) {
+      fixCellInner = `<button type="button" class="pass-fix-btn" data-fix-pass="${escapeHtml(p.pass_id)}">Fix →</button>`;
+    }
+
     li.innerHTML = `
-      <span class="pass-icon" aria-hidden="true">${PASS_GLYPH[p.status] || "·"}</span>
+      <span class="pass-icon" aria-hidden="true">${glyph}</span>
       <div class="pass-body">
         <span class="pass-name">${escapeHtml(p.pass_id)}</span>
-        <span class="pass-summary">${escapeHtml(p.summary || p.name)}</span>
+        <span class="pass-summary">${escapeHtml(displaySummary)}</span>
       </div>
+      <span class="pass-fix-cell">${fixCellInner}</span>
       <span class="pass-duration">${(p.duration_ms || 0).toFixed(1)}ms</span>
     `;
+
+    const fixBtn = li.querySelector(".pass-fix-btn");
+    if (fixBtn) {
+      fixBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        runFixFromPass(fixBtn.getAttribute("data-fix-pass"));
+      });
+    }
 
     if (p.diagnostics && p.diagnostics.length) {
       li.addEventListener("click", () => {
@@ -792,6 +1416,177 @@ function renderPasses(passes, { animate } = { animate: false }) {
   });
 
   $("passesCard").hidden = false;
+}
+
+async function runFixFromPass(fixType) {
+  const hint = $("statusHint");
+  const original_prompt = $("prompt").value.trim();
+  const cand = getCandidate(state.selectedId);
+  if (!cand || !original_prompt) {
+    if (hint) hint.textContent = "Need a design brief and candidate to run a fix.";
+    return;
+  }
+  if (!PASS_FIX_TYPES.has(fixType)) return;
+
+  beginFixTerminalTrace(fixType);
+
+  passFixState.spinningPassId = fixType;
+  renderPasses(cand.passes, { animate: false });
+  if (hint) hint.textContent = `Fix running (${fixType}) · see Compiler output → Live trace`;
+
+  try {
+    appendFixTerminalLine("POST /api/fix (single candidate, ~same cost as one compile variant)…");
+    const res = await fetch("/api/fix", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        original_prompt,
+        current_sequence: cleanSeq(cand.sequence),
+        fix_type: fixType,
+        candidates: state.candidates,
+      }),
+    });
+    appendFixTerminalLine(
+      `HTTP ${res.status} ${res.ok ? "OK" : "error"} · reading body…`,
+    );
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (!data.fix || !data.fix.new_candidate_id) {
+      throw new Error("Invalid fix response");
+    }
+
+    appendFixTerminalLine(
+      `Response OK · new candidate #${data.fix.new_candidate_index} · id ${data.fix.new_candidate_id}`,
+    );
+
+    passFixState.spinningPassId = null;
+    passFixState.lastFix = {
+      passId: data.fix.fix_type,
+      newCandidateId: data.fix.new_candidate_id,
+      candNum: data.fix.new_candidate_index,
+      stillFlagged: !!data.fix.still_flagged,
+    };
+    state.candidates = Array.isArray(data.candidates) ? data.candidates : [];
+    state.selectedId = data.fix.new_candidate_id;
+
+    paintLiveCompileWorkspace(data, { partial: false, animatePasses: false });
+
+    const nid = data.fix.new_candidate_id;
+    const row = document.querySelector(`#candidatesList .candidate-row[data-id="${CSS.escape(nid)}"]`);
+    if (row) row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const pareto = $("paretoSection");
+    if (pareto && !pareto.hidden) {
+      pareto.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    const sid =
+      data.snapshot_id != null && SNAPSHOT_ID_RE.test(String(data.snapshot_id).trim().toLowerCase())
+        ? String(data.snapshot_id).trim().toLowerCase()
+        : null;
+    if (sid) {
+      state.snapshotIdForBar = sid;
+      replaceUrlWithSnapshot(sid);
+      updateSnapshotBar(sid);
+    }
+
+    if (hint) hint.textContent = "Fix complete — new candidate added to the Pareto set.";
+
+    const badge = $("streamBadge");
+    if (badge) {
+      badge.textContent = data.fix.still_flagged ? "Fix done · review passes" : "Fixed";
+      badge.classList.add("done");
+    }
+
+    const extra = [
+      `Merged & re-ranked: ${data.candidates.length} candidate(s)`,
+      data.fix.still_flagged
+        ? `Pass “${data.fix.fix_type}” still flagged on new sequence — try Fix again or edit the brief`
+        : `Pass “${data.fix.fix_type}” cleared on new sequence (see Compiler passes)`,
+    ];
+    endFixTerminalTrace({
+      tickerText: data.fix.still_flagged
+        ? `Fix · finished · candidate #${data.fix.new_candidate_index} · review warnings`
+        : `Fix · finished · candidate #${data.fix.new_candidate_index} · done`,
+      extraLogLines: extra,
+    });
+  } catch (e) {
+    console.error(e);
+    passFixState.spinningPassId = null;
+    const c2 = getCandidate(state.selectedId);
+    if (c2) renderPasses(c2.passes, { animate: false });
+    if (hint) hint.textContent = `Fix failed: ${e.message || e}`;
+    const badge = $("streamBadge");
+    if (badge) {
+      badge.textContent = "Fix failed";
+      badge.classList.remove("done");
+    }
+    endFixTerminalTrace({
+      tickerText: `Fix · failed · ${e.message || e}`,
+      extraLogLines: [`Error: ${e.message || e}`],
+    });
+  }
+}
+
+function renderExpertQa(rag) {
+  const card = $("expertQaCard");
+  const metaEl = $("expertQaMeta");
+  const body = $("expertQaBody");
+  if (!card || !body) return;
+  const lint = rag && rag.expert_lint;
+  const rev = rag && rag.expert_review;
+  if (!lint && !rev) {
+    card.hidden = true;
+    body.innerHTML = "";
+    if (metaEl) metaEl.textContent = "";
+    return;
+  }
+  card.hidden = false;
+  if (metaEl) {
+    if (lint && !lint.error) {
+      const g = lint.grade || "—";
+      const sc = lint.score != null ? lint.score : "—";
+      metaEl.textContent = `${g} · score ${sc}`;
+    } else {
+      metaEl.textContent = "";
+    }
+  }
+  const chunks = [];
+  if (lint && !lint.error) {
+    chunks.push(`<p class="expert-qa-summary">${escapeHtml(lint.summary || "")}</p>`);
+    if (Array.isArray(lint.issues) && lint.issues.length) {
+      chunks.push('<ul class="expert-qa-issues">');
+      for (const iss of lint.issues) {
+        const sev = iss.severity === "error" ? "error" : "warn";
+        chunks.push(`<li class="is-${sev}">${escapeHtml(iss.message || "")}</li>`);
+      }
+      chunks.push("</ul>");
+    }
+  } else if (lint && lint.error) {
+    chunks.push(`<p class="expert-qa-err">${escapeHtml(lint.error)}</p>`);
+  }
+  if (rev && !rev.error) {
+    if (rev.summary) {
+      const v = rev.verdict ? ` · ${rev.verdict}` : "";
+      chunks.push(
+        `<p class="expert-qa-rev"><strong>Model review</strong>${escapeHtml(v)}: ${escapeHtml(rev.summary)}</p>`,
+      );
+    }
+    if (Array.isArray(rev.concerns) && rev.concerns.length) {
+      chunks.push('<ul class="expert-qa-concerns">');
+      for (const c of rev.concerns) {
+        chunks.push(`<li>${escapeHtml(c)}</li>`);
+      }
+      chunks.push("</ul>");
+    }
+  } else if (rev && rev.error) {
+    chunks.push(`<p class="expert-qa-err">${escapeHtml(rev.error)}</p>`);
+  }
+  body.innerHTML = chunks.join("");
 }
 
 function escapeHtml(s) {
@@ -832,10 +1627,15 @@ function renderRagPanel(rag) {
 
   card.hidden = false;
   const minS = rag.min_similarity != null ? rag.min_similarity : 0.6;
+  const minPromo = rag.min_similarity_promoter;
+  const promoNote =
+    minPromo != null && Number(minPromo) > Number(minS)
+      ? `, promoters ≥ ${Number(minPromo).toFixed(2)}`
+      : "";
   const nIgem = parts.filter((p) => p.sequence_source === "registry").length;
   const nNcbi = parts.filter((p) => p.sequence_source === "ncbi").length;
   const nModel = parts.length - nIgem - nNcbi;
-  summary.textContent = `${nIgem} iGEM (sim ≥ ${minS}) · ${nNcbi} NCBI Gene · ${nModel} model / unverified.`;
+  summary.textContent = `${nIgem} iGEM (sim ≥ ${minS}${promoNote}) · ${nNcbi} NCBI Gene · ${nModel} model / unverified.`;
 
   list.innerHTML = "";
   for (const p of parts) {
@@ -891,10 +1691,12 @@ function renderCandidates(candidates, selectedId) {
     const gc = (c.scores.gc_balance * 100).toFixed(0);
     const clean = (c.scores.cleanliness * 100).toFixed(0);
 
+    const fixLabel =
+      c.fix_badge ? `<span class="candidate-fix-badge">${escapeHtml(c.fix_badge)}</span>` : "";
     li.innerHTML = `
       <span class="candidate-pareto" title="${c.is_pareto ? "Pareto-optimal" : "Dominated"}">${c.is_pareto ? "★" : "○"}</span>
       <div class="candidate-meta">
-        <span class="candidate-strategy">${escapeHtml(c.strategy_name || c.id)}</span>
+        <span class="candidate-strategy">${escapeHtml(c.strategy_name || c.id)}${fixLabel}</span>
         <span class="candidate-scoreline">
           <span>exp <em>${expr}</em></span>
           <span>burden <em>${burden}</em></span>
@@ -1053,6 +1855,8 @@ const COMPILE_PHASES = [
 let compilePipelineCleanup = null;
 /** @type {AbortController | null} */
 let compileAbort = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let fixTraceInterval = null;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -1063,6 +1867,23 @@ function formatElapsed(ms) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+/** In docked live compile, overflow is on `.compile-terminal-scroll`, not the `<pre>`. */
+function scrollCompileOutputToLatest() {
+  const debugPre = $("compileDebugLog");
+  const livePre = $("compileLivePre");
+  const wrap =
+    (debugPre && debugPre.closest(".compile-terminal-scroll")) ||
+    (livePre && livePre.closest(".compile-terminal-scroll")) ||
+    null;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (wrap) wrap.scrollTop = wrap.scrollHeight;
+      if (debugPre) debugPre.scrollTop = debugPre.scrollHeight;
+      if (livePre) livePre.scrollTop = livePre.scrollHeight;
+    });
+  });
 }
 
 /** Latest line in ticker; scrollback in monospace panel */
@@ -1078,9 +1899,102 @@ function updateLiveCompileTrace(lines) {
   if (ticker && safe.length) {
     ticker.textContent = safe[safe.length - 1];
   }
+  scrollCompileOutputToLatest();
 }
 
-async function pollCompileJob(jobId, signal, onLines, onStreams) {
+function fixTraceTimeStamp() {
+  return new Date().toLocaleTimeString(undefined, { hour12: false });
+}
+
+/** Open the docked terminal and show that a targeted fix is running (compile panel is often hidden after job ends). */
+function beginFixTerminalTrace(fixType) {
+  const pipe = $("compilePipeline");
+  const idle = $("terminalIdleHint");
+  const pre = $("compileDebugLog");
+  const ticker = $("compileTicker");
+  const chip = $("compileChip");
+  const elapsedEl = $("compileElapsed");
+  const counter = $("compileStepCounter");
+  const slot = $("compileStepSlot");
+  const barWrap = document.querySelector(".compile-pipeline-bar");
+  const fill = $("compilePipelineFill");
+
+  if (fixTraceInterval) {
+    clearInterval(fixTraceInterval);
+    fixTraceInterval = null;
+  }
+  if (idle) idle.hidden = true;
+  if (pipe) {
+    pipe.hidden = false;
+    pipe.setAttribute("aria-busy", "true");
+  }
+  if (chip) chip.textContent = "Fix";
+  if (counter) counter.textContent = "Targeted fix";
+  if (slot) slot.innerHTML = "";
+  if (fill) fill.style.width = "50%";
+  if (barWrap) barWrap.setAttribute("aria-valuenow", "50");
+
+  const t0 = Date.now();
+  if (elapsedEl) elapsedEl.textContent = "0:00";
+  fixTraceInterval = setInterval(() => {
+    if (elapsedEl) elapsedEl.textContent = formatElapsed(Date.now() - t0);
+  }, 380);
+
+  if (pre) {
+    pre.textContent = `${fixTraceTimeStamp()}  Fix · start · ${fixType} · same compile pipeline · awaiting server…`;
+    pre.hidden = false;
+  }
+  if (ticker) {
+    ticker.textContent = `Fix · running (${fixType}) · inference + passes…`;
+  }
+  const badge = $("streamBadge");
+  if (badge) {
+    badge.textContent = "Fix…";
+    badge.classList.remove("done");
+  }
+  scrollCompileOutputToLatest();
+}
+
+function appendFixTerminalLine(message) {
+  const pre = $("compileDebugLog");
+  const ticker = $("compileTicker");
+  if (!pre) return;
+  pre.textContent += `\n${fixTraceTimeStamp()}  ${message}`;
+  pre.hidden = false;
+  if (ticker) {
+    const short = message.length > 140 ? `${message.slice(0, 137)}…` : message;
+    ticker.textContent = short;
+  }
+  scrollCompileOutputToLatest();
+}
+
+function endFixTerminalTrace({ tickerText, extraLogLines = [] }) {
+  if (fixTraceInterval) {
+    clearInterval(fixTraceInterval);
+    fixTraceInterval = null;
+  }
+  const pipe = $("compilePipeline");
+  const ticker = $("compileTicker");
+  const pre = $("compileDebugLog");
+  const chip = $("compileChip");
+  const fill = $("compilePipelineFill");
+  const barWrap = document.querySelector(".compile-pipeline-bar");
+
+  if (pipe) pipe.setAttribute("aria-busy", "false");
+  if (chip) chip.textContent = "Gemma-4";
+  if (fill) fill.style.width = "100%";
+  if (barWrap) barWrap.setAttribute("aria-valuenow", "100");
+  const counter = $("compileStepCounter");
+  if (counter) counter.textContent = `Step 1 / ${COMPILE_PHASES.length}`;
+  if (ticker && tickerText) ticker.textContent = tickerText;
+  for (const ln of extraLogLines) {
+    if (pre) pre.textContent += `\n${fixTraceTimeStamp()}  ${ln}`;
+  }
+  if (pre) pre.hidden = !String(pre.textContent || "").trim();
+  scrollCompileOutputToLatest();
+}
+
+async function pollCompileJob(jobId, signal, onLines, onStreams, onPartialResult) {
   const url = `/api/compile/status?job_id=${encodeURIComponent(jobId)}`;
   while (true) {
     const res = await fetch(url, { signal });
@@ -1088,8 +2002,20 @@ async function pollCompileJob(jobId, signal, onLines, onStreams) {
     if (!res.ok) throw new Error(data.error || res.statusText);
     if (typeof onLines === "function") onLines(data.lines || []);
     if (typeof onStreams === "function") onStreams(data.streams || {});
+    if (
+      data.result &&
+      data.result.partial === true &&
+      typeof onPartialResult === "function"
+    ) {
+      onPartialResult(data.result);
+    }
     if (data.done) {
-      if (data.error) throw new Error(data.error);
+      const errRaw = data.error;
+      if (errRaw != null && errRaw !== "") {
+        const errStr =
+          typeof errRaw === "string" ? errRaw.trim() : String(errRaw).trim();
+        throw new Error(errStr || "Compile failed (empty server error).");
+      }
       return data.result;
     }
     await sleep(380);
@@ -1112,6 +2038,7 @@ function updateLiveStreams(streams) {
   keys.sort();
   pre.textContent = keys.map((k) => `── ${k} ──\n${streams[k]}`).join("\n\n");
   pre.scrollTop = pre.scrollHeight;
+  scrollCompileOutputToLatest();
 }
 
 /** Real backend trace (no fake timed phases). */
@@ -1325,6 +2252,9 @@ function startCompilePipeline(numCandidates) {
 
 /** Switch the active candidate and re-render every dependent surface. */
 function selectCandidate(id, { animatePasses = false } = {}) {
+  if (passFixState.lastFix && id !== passFixState.lastFix.newCandidateId) {
+    passFixState.lastFix = null;
+  }
   const cand = getCandidate(id);
   if (!cand) return;
   state.selectedId = id;
@@ -1347,6 +2277,7 @@ function selectCandidate(id, { animatePasses = false } = {}) {
   renderCandidates(state.candidates, id);
   renderParetoChart(state.candidates, id);
   renderRagPanel(cand.rag);
+  renderExpertQa(cand.rag);
 
   // Reveal everything that's gated until a result exists.
   $("metrics").hidden = false;
@@ -1365,6 +2296,14 @@ async function compile() {
   }
 
   showWorkspace();
+  clearSnapshotFromUrl();
+  state.snapshotIdForBar = null;
+  state.selectedId = null;
+  state.candidates = [];
+  lastPartialPassesSig = null;
+  passFixState.spinningPassId = null;
+  passFixState.lastFix = null;
+  updateSnapshotBar(null);
 
   $("userBubbleText").textContent = prompt;
   $("userBubble").hidden = false;
@@ -1376,6 +2315,8 @@ async function compile() {
   const ragEl1 = $("ragCard");
   if (ragEl1) ragEl1.hidden = true;
   $("passesCard").hidden = true;
+  const expertQaEl0 = $("expertQaCard");
+  if (expertQaEl0) expertQaEl0.hidden = true;
   $("candidatesCard").hidden = true;
   $("paretoSection").hidden = true;
   $("passesList").innerHTML = "";
@@ -1387,7 +2328,7 @@ async function compile() {
 
   btn.disabled = true;
   hint.textContent =
-    "Live trace below · hosted Gemma (parallel) + static passes — stalls usually mean API still generating";
+    "Live trace below · variants may appear one at a time as each finishes inferencing + registry pass";
 
   try {
     const res = await fetch("/api/compile", {
@@ -1398,6 +2339,21 @@ async function compile() {
     });
 
     let data;
+    let openedWorkspaceEarly = false;
+    const onPartialResult = (partial) => {
+      if (!openedWorkspaceEarly) {
+        openedWorkspaceEarly = true;
+        finishCompilePipelineSuccess();
+        stopCompilePipelineVisual();
+      }
+      paintLiveCompileWorkspace(partial, { partial: true, animatePasses: false });
+      const vr = partial.variants_ready ?? "—";
+      const vt = partial.variants_total ?? "—";
+      hint.textContent = `Showing best of ${vr}/${vt} · more generating…`;
+      badge.textContent = `Partial (${vr}/${vt})`;
+      badge.classList.remove("done");
+    };
+
     if (res.status === 202) {
       const meta = await res.json();
       if (!meta.job_id) throw new Error("Server did not return job_id");
@@ -1405,58 +2361,57 @@ async function compile() {
         meta.job_id,
         compileAbort.signal,
         updateLiveCompileTrace,
-        updateLiveStreams
+        updateLiveStreams,
+        onPartialResult
       );
     } else {
       data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
     }
 
-    setModelLabel(data.model);
-
     state.candidates = Array.isArray(data.candidates) ? data.candidates : [];
     if (!state.candidates.length) throw new Error("Compiler returned no candidates");
 
-    state.selectedId = data.best_id || state.candidates[0].id;
-    const best = getCandidate(state.selectedId);
-
-    const extrasMeta = document.getElementById("extrasMeta");
-    if (extrasMeta) {
-      const paretoCount = state.candidates.filter((c) => c.is_pareto).length;
-      extrasMeta.textContent = `${state.candidates.length} candidates · ${paretoCount}★ · ${data.model}`;
+    if (!openedWorkspaceEarly) {
+      finishCompilePipelineSuccess();
+      await sleep(420);
+      stopCompilePipelineVisual();
     }
 
-    finishCompilePipelineSuccess();
-    await sleep(420);
-    stopCompilePipelineVisual();
+    paintLiveCompileWorkspace(data, {
+      partial: false,
+      animatePasses: openedWorkspaceEarly ? false : true,
+    });
 
-    // Wire up everything for the BEST candidate first; reveal as we go.
-    const seq = cleanSeq(best.sequence);
-    lastSequence = seq;
-    const mapSlots = best.rag && Array.isArray(best.rag.map_slots) ? best.rag.map_slots : null;
-    renderPlasmid(seq, best.strategy || "compiled_construct", mapSlots);
-    $("mLen").textContent = `${seq.length} bp`;
-    $("mGc").textContent = `${gcPercent(seq).toFixed(2)}%`;
-    const cai = passMetricFor(best.passes, "cai");
-    $("mTm").textContent = cai ? `CAI ${cai}` : `${wallaceTm(seq).toFixed(0)} °C`;
-    $("seqPre").textContent = seq;
+    const activeCand = getCandidate(state.selectedId);
+    if (!activeCand) throw new Error("missing best candidate");
 
-    // Animate compiler passes + render candidates/Pareto in parallel with thought stream.
-    renderPasses(best.passes, { animate: true });
-    renderCandidates(state.candidates, state.selectedId);
-    renderParetoChart(state.candidates, state.selectedId);
-    renderRagPanel(best.rag);
+    const sid =
+      data.snapshot_id != null && SNAPSHOT_ID_RE.test(String(data.snapshot_id).trim().toLowerCase())
+        ? String(data.snapshot_id).trim().toLowerCase()
+        : null;
+    if (sid) {
+      state.snapshotIdForBar = sid;
+      replaceUrlWithSnapshot(sid);
+      updateSnapshotBar(sid);
+    } else {
+      state.snapshotIdForBar = null;
+      updateSnapshotBar(null);
+    }
 
     const thoughtEl = $("thoughtText");
-    thoughtEl.textContent = "";
-    badge.textContent = "Reasoning";
-    await streamThought(thoughtEl, best.thought);
-    badge.textContent = "Done";
-    badge.classList.add("done");
+    if (openedWorkspaceEarly) {
+      thoughtEl.textContent = activeCand.thought || "";
+      badge.textContent = "Done";
+      badge.classList.add("done");
+    } else {
+      thoughtEl.textContent = "";
+      badge.textContent = "Reasoning";
+      await streamThought(thoughtEl, activeCand.thought);
+      badge.textContent = "Done";
+      badge.classList.add("done");
+    }
     hint.textContent = `Ready · ${state.candidates.length} candidates`;
-
-    $("metrics").hidden = false;
-    $("seqCard").hidden = false;
     $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
   } catch (e) {
     if (e.name === "AbortError") {
@@ -1467,15 +2422,43 @@ async function compile() {
       return;
     }
     console.error(e);
-    hint.textContent = e.message || "Compile failed";
+    const errMsg =
+      (e && typeof e.message === "string" && e.message.trim()) ||
+      (e != null ? String(e) : "") ||
+      "Compile failed";
+    hint.textContent = errMsg;
     stopCompilePipelineVisual();
-    $("thoughtText").textContent = `Something went wrong: ${hint.textContent}`;
+    $("thoughtText").textContent = `Something went wrong: ${errMsg}`;
     badge.textContent = "Error";
     badge.classList.remove("done");
   } finally {
     compileAbort = null;
     btn.disabled = false;
   }
+}
+
+const snapshotCopyBtn = $("snapshotCopyBtn");
+if (snapshotCopyBtn) {
+  snapshotCopyBtn.addEventListener("click", async () => {
+    const sid = state.snapshotIdForBar;
+    const fb = $("snapshotCopyFeedback");
+    if (!sid || !SNAPSHOT_ID_RE.test(sid)) return;
+    const href = `${window.location.origin}${buildSnapshotPageUrl(sid)}`;
+    try {
+      await navigator.clipboard.writeText(href);
+      if (fb) fb.textContent = "Copied";
+      snapshotCopyBtn.classList.add("is-copied");
+      setTimeout(() => {
+        if (fb) fb.textContent = "";
+        snapshotCopyBtn.classList.remove("is-copied");
+      }, 1600);
+    } catch {
+      if (fb) fb.textContent = "Copy failed";
+      setTimeout(() => {
+        if (fb) fb.textContent = "";
+      }, 2000);
+    }
+  });
 }
 
 $("compileBtn").addEventListener("click", compile);
@@ -1522,10 +2505,12 @@ $("seqCopyBtn").addEventListener("click", async () => {
   }
 });
 
-if (plasmidViewport && plasmidSvgEl) attachPlasmidNav(plasmidSvgEl, plasmidViewport);
+const plasmidSvgEl = $("plasmidSvg");
+const plasmidViewport = $("viewport");
+if (plasmidSvgEl && plasmidViewport) attachPlasmidNav(plasmidSvgEl, plasmidViewport);
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", refreshBackendMeta);
+  document.addEventListener("DOMContentLoaded", bootstrapApp);
 } else {
-  refreshBackendMeta();
+  bootstrapApp();
 }

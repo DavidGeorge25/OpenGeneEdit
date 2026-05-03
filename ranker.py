@@ -7,14 +7,16 @@ Objectives (all on [0,1] for clean Pareto comparisons):
   - gc_balance   ↑ better — 1 - 2|GC - 0.5|
   - cleanliness  ↑ better — penalizes Type IIS sites (Golden Gate friction)
 
-The composite score is a weighted sum used to break Pareto ties for sorting,
-but the Pareto front is computed in objective space (no weights) so that
-domination is honest.
+The composite score is a weighted sum used to break ties within the same
+pipeline / prompt-fit band. ``best_id`` sorts by pipeline tier (verified topology
+first), then prompt token overlap with assembly metadata, then composite. The
+Pareto front is still computed only from the four sequence objectives.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, asdict
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from passes import PassResult
 
@@ -28,7 +30,7 @@ class CandidateScores:
     composite: float
 
 
-# Weights for composite score — used for sort order and "best" selection only.
+# Weights for sequence composite (breaks ties after pipeline + prompt fit).
 WEIGHTS = {
     "expression":  0.40,
     "low_burden":  0.25,
@@ -110,15 +112,133 @@ def pareto_front_ids(candidates: List[Dict]) -> List[str]:
     return pareto
 
 
+def scores_to_dict(s: CandidateScores) -> Dict[str, float]:
+    return asdict(s)
+
+
+# Small stopword strip so “Design a plasmid…” doesn’t drown signal.
+_ALIGNMENT_STOP = frozenset(
+    {
+        "design",
+        "research",
+        "prototype",
+        "plasmid",
+        "construct",
+        "using",
+        "with",
+        "when",
+        "both",
+        "only",
+        "from",
+        "that",
+        "this",
+        "have",
+        "high",
+        "minimal",
+        "standard",
+        "biology",
+        "synthetic",
+        "coli",
+        "e",
+        "cell",
+        "cells",
+        "turn",
+        "into",
+        "your",
+        "brief",
+        "gate",
+        "logic",
+        "boolean",
+    }
+)
+
+
+def pipeline_tier(rag: Optional[Dict[str, Any]]) -> int:
+    """Higher = closer to formal / structured compilation (used for ``best_id`` ordering)."""
+
+    if not isinstance(rag, dict):
+        return 0
+    pipe = str(rag.get("pipeline") or "").strip()
+    if pipe == "circuit_synth":
+        return 3
+    if pipe == "slot_template":
+        return 2
+    if pipe == "rag_first":
+        return 1
+    return 0
+
+
+def _alignment_tokens(prompt: str) -> List[str]:
+    p = (prompt or "").lower()
+    raw = re.findall(r"[a-z][a-z0-9]{3,}", p)
+    return [t for t in raw if t not in _ALIGNMENT_STOP]
+
+
+def alignment_haystack(thought: str, rag: Optional[Dict[str, Any]]) -> str:
+    chunks: List[str] = [thought or ""]
+    if isinstance(rag, dict):
+        intent = rag.get("intent")
+        if isinstance(intent, dict):
+            for key in ("input_analytes", "gate", "reporter", "logic_summary", "notes"):
+                v = intent.get(key)
+                if v is None:
+                    continue
+                if isinstance(v, (list, tuple)):
+                    chunks.extend(str(x) for x in v)
+                else:
+                    chunks.append(str(v))
+        for p in rag.get("parts") or []:
+            if isinstance(p, dict):
+                chunks.append(str(p.get("part_name") or ""))
+                chunks.append(str(p.get("query") or ""))
+        for slot in rag.get("map_slots") or []:
+            if isinstance(slot, dict):
+                chunks.append(str(slot.get("label") or ""))
+                chunks.append(str(slot.get("part_name") or ""))
+                chunks.append(str(slot.get("part_type") or ""))
+        ov = rag.get("ordered_part_names")
+        if isinstance(ov, list):
+            chunks.extend(str(x) for x in ov)
+    return " ".join(chunks)
+
+
+def prompt_alignment_score(prompt: str, thought: str, rag: Optional[Dict[str, Any]]) -> float:
+    """Share of salient prompt words that appear in assembly metadata (0–1)."""
+
+    toks = _alignment_tokens(prompt)
+    if not toks:
+        return 0.5
+    blob = alignment_haystack(thought, rag).lower()
+    hits = sum(1 for t in toks if t in blob)
+    return max(0.0, min(1.0, hits / len(toks)))
+
+
+def attach_fidelity_scores(row_scores: Dict[str, float], *, prompt: str, row: Dict[str, Any]) -> None:
+    """Mutate ``row_scores`` with ``prompt_alignment`` / ``pipeline_tier`` (preserves composite)."""
+
+    rag = row.get("rag")
+    if not isinstance(rag, dict):
+        rag = None
+    row_scores["pipeline_tier"] = float(pipeline_tier(rag))
+    row_scores["prompt_alignment"] = round(
+        prompt_alignment_score(prompt, str(row.get("thought") or ""), rag), 4
+    )
+
+
 def rank(candidates: List[Dict]) -> List[Dict]:
-    """Return candidates sorted by composite desc, with `rank` and `is_pareto` added."""
+    """Sort for default ``best_id``: pipeline tier → prompt overlap → composite; then Pareto flags."""
+
     pareto = set(pareto_front_ids(candidates))
-    ordered = sorted(candidates, key=lambda c: -c["scores"]["composite"])
+
+    def sort_key(c: Dict) -> tuple:
+        s = c.get("scores") or {}
+        tier = float(s.get("pipeline_tier", 0))
+        align = float(s.get("prompt_alignment", 0))
+        comp = float(s.get("composite", 0))
+        return (-tier, -align, -comp)
+
+    ordered = sorted(candidates, key=sort_key)
     for i, c in enumerate(ordered):
         c["rank"] = i + 1
         c["is_pareto"] = c["id"] in pareto
     return ordered
-
-
-def scores_to_dict(s: CandidateScores) -> Dict[str, float]:
-    return asdict(s)

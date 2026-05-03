@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260502-unverified-ast" />
+    <link rel="stylesheet" href="/css/app.css?v=20260503-plasmid-nav4" />
   </head>
   <body>
     <nav class="topnav">
@@ -71,6 +71,14 @@
           <div class="chat-toolbar">
             <button type="button" class="btn-text" id="newDesignBtn">← New design</button>
             <span class="pill pill--small" id="modelPill">Model: Gemma-4</span>
+            <span class="chat-toolbar-gap" aria-hidden="true"></span>
+            <div class="snapshot-bar" id="snapshotBar" hidden>
+              <span class="snapshot-bar-label">Reopen later</span>
+              <button type="button" class="btn-text btn-text--dense" id="snapshotCopyBtn" title="Copy URL with bookmark">
+                Copy link
+              </button>
+              <span class="snapshot-feedback" id="snapshotCopyFeedback" aria-live="polite"></span>
+            </div>
           </div>
           <div class="chat-scroll" id="chatScroll">
             <article class="bubble bubble-user" id="userBubble" hidden>
@@ -142,7 +150,7 @@
           <div class="artifact-body">
             <div class="artifact-section">
               <h3 class="artifact-h3">Construct map</h3>
-              <p class="artifact-hint">Hover features or labels · copy DNA per segment · ⌘/Ctrl + scroll to zoom · drag to pan</p>
+              <p class="artifact-hint">Hover features or labels · copy DNA per segment · scroll to zoom map · drag to pan · Shift+scroll scrolls the page · double-click map resets zoom</p>
               <div class="viz-frame" id="vizFrame">
                 <svg
                   id="plasmidSvg"
@@ -273,6 +281,14 @@
               </p>
             </section>
 
+            <section class="passes-card" id="expertQaCard" hidden aria-label="Design consistency check">
+              <header class="passes-card-head">
+                <span class="passes-card-label">Design consistency</span>
+                <span class="passes-card-meta" id="expertQaMeta"></span>
+              </header>
+              <div class="expert-qa-body" id="expertQaBody"></div>
+            </section>
+
             <section class="passes-card" id="passesCard" hidden aria-label="Compiler passes">
               <header class="passes-card-head">
                 <span class="passes-card-label">Compiler passes</span>
@@ -285,6 +301,6 @@
       </div>
     </section>
 
-    <script src="/js/app.js?v=20260502-plasmid-tooltip" type="module"></script>
+    <script src="/js/app.js?v=20260503-fix-trace" type="module"></script>
   </body>
 </html>

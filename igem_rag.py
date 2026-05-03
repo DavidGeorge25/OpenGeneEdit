@@ -11,6 +11,9 @@ Environment:
   • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to **substitute** registry DNA for a
     slot (default ``0.6``). Below threshold the model's DNA slice for that slot is kept.
 
+  • ``DGENE_RAG_MIN_SIM_PROMOTER`` — stricter floor for **Promoter** slots only (default
+    ``0.80``). Reduces false Chroma hits where names share a short prefix (e.g. ``pL*``).
+
   • **NCBI Gene fallback** (``ncbi_gene.py``) — when iGEM does not verify a CDS-like slot,
     Entrez Gene + RefSeq nucleotide is queried for the symbol (e.g. ``PhzR``). Set
     ``NCBI_API_KEY`` or ``DGENE_NCBI_API_KEY`` for 10 req/s (free at NCBI). ``DGENE_NCBI=0``
@@ -90,6 +93,23 @@ def min_similarity() -> float:
         return max(0.0, min(1.0, float(raw)))
     except ValueError:
         return 0.6
+
+
+def min_similarity_for_slot(part_type_filter: Optional[str]) -> float:
+    """Per-slot cosine threshold (promoters need higher precision than 0.6).
+
+    Prevents vague Chroma hits (e.g. ``pL*`` name collision) from substituting
+    unrelated registry promoters when the brief names a specific sensor."""
+    base = min_similarity()
+    th = (part_type_filter or "").strip().lower()
+    if th != "promoter":
+        return base
+    raw = os.environ.get("DGENE_RAG_MIN_SIM_PROMOTER", "0.80").strip()
+    try:
+        prom = max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        prom = 0.80
+    return max(base, prom)
 
 
 def _rag_env_bool(name: str, default: bool = False) -> bool:
@@ -1080,6 +1100,25 @@ def extract_part_names(thought: str) -> List[Tuple[Optional[str], str]]:
     return [(th, q) for _, th, q in events]
 
 
+def _cassette_tier(part_type_filter: Optional[str]) -> int:
+    """Sort key: 5′→3′ cassette order (promoters first, terminator last).
+
+    Extraction order follows model prose and can list CDS before RBS; we reassemble
+    registry segments in this order before returning DNA to the UI."""
+    th = (part_type_filter or "").strip().lower()
+    if th == "promoter":
+        return 10
+    if th in ("operator", "insulator"):
+        return 25
+    if th == "rbs":
+        return 40
+    if th in ("cds", "reporter"):
+        return 55
+    if th == "terminator":
+        return 85
+    return 50
+
+
 def extract_part_queries(thought: str) -> Tuple[List[Tuple[Optional[str], str]], str]:
     """Build (type_hint, query_text) pairs for RAG retrieval.
 
@@ -1268,7 +1307,6 @@ def apply_rag_substitution(
             },
         }
 
-    thr = min_similarity()
     n = len(queries)
     chunks = _split_sequence_chunks(seq_clean, n)
     merged: List[str] = []
@@ -1276,6 +1314,7 @@ def apply_rag_substitution(
     retrieve_k = max(1, min(10, 5 if rag_debug_enabled() else 1))
 
     for i, (type_hint, query_text) in enumerate(queries):
+        thr = min_similarity_for_slot(type_hint)
         model_slice = chunks[i] if i < len(chunks) else ""
         hits = retrieve_parts(query_text, part_type_filter=type_hint, top_k=retrieve_k)
         best = hits[0] if hits else None
@@ -1300,6 +1339,17 @@ def apply_rag_substitution(
             )
 
         verified = best is not None and sim >= thr
+
+        if (
+            best is not None
+            and not verified
+            and (type_hint or "").strip().lower() == "promoter"
+            and sim >= min_similarity()
+        ):
+            rag_always_log(
+                f"{ctx}: SLOT[{i}] PROMOTER hit {best.part_name!r} sim={sim:.4f} "
+                f"< promoter_threshold={thr:.4f} — treating as unverified (keep model slice)"
+            )
 
         if verified:
             registry_seq = "".join(best.sequence.upper().split())
@@ -1428,6 +1478,31 @@ def apply_rag_substitution(
                 }
             )
 
+    idx_order = sorted(
+        range(len(parts_out)),
+        key=lambda i: (_cassette_tier(parts_out[i].get("part_type_filter")), i),
+    )
+    if idx_order != list(range(len(parts_out))):
+        perm = ",".join(str(i) for i in idx_order)
+        rag_always_log(
+            f"{ctx}: cassette_order — reassembled 5′→3′ "
+            f"(Promoter→RBS→CDS→Terminator); slot permutation [{perm}]"
+        )
+        merged = [merged[i] for i in idx_order]
+        parts_out = [parts_out[i] for i in idx_order]
+        queries_ordered: List[Tuple[Optional[str], str]] = [queries[i] for i in idx_order]
+    else:
+        queries_ordered = list(queries)
+
+    map_slots_out: List[Dict[str, str]] = []
+    for type_hint, query_text in queries_ordered:
+        map_slots_out.append(
+            {
+                "label": _part_display_label(type_hint, query_text),
+                "sub": _part_map_subcategory(type_hint, query_text),
+            }
+        )
+
     final = "".join(merged)
     verified_count = sum(1 for p in parts_out if p.get("verified"))
     sequence_changed = final != seq_clean
@@ -1458,13 +1533,16 @@ def apply_rag_substitution(
         )
     rag_always_log(
         f"{ctx}: assembly_audit summary parsing_strategy={parsing_strategy!r} "
-        f"identified_slots={len(queries)} assembled_slots={len(parts_out)} "
-        f"final_bp={len(final)} parsed_vs_assembled_match={len(queries) == len(parts_out)}"
+        f"identified_slots={len(queries_ordered)} assembled_slots={len(parts_out)} "
+        f"final_bp={len(final)} "
+        f"parsed_vs_assembled_match={len(queries_ordered) == len(parts_out)}"
     )
 
     rag_debug_log(
-        f"{ctx}: substitution summary — threshold={thr:.3f} verified_parts={verified_count}/"
-        f"{len(parts_out)} model_bp={len(seq_clean)} final_bp={len(final)} "
+        f"{ctx}: substitution summary — rag_min_sim={min_similarity():.3f} "
+        f"promoter_min={min_similarity_for_slot('Promoter'):.3f} "
+        f"verified_parts={verified_count}/{len(parts_out)} "
+        f"model_bp={len(seq_clean)} final_bp={len(final)} "
         f"sequence_changed_vs_model={sequence_changed} "
         f"(registry DNA merged before compiler passes / API response)"
     )
@@ -1472,7 +1550,8 @@ def apply_rag_substitution(
     return final, {
         "enabled": True,
         "applied": True,
-        "min_similarity": thr,
+        "min_similarity": min_similarity(),
+        "min_similarity_promoter": min_similarity_for_slot("Promoter"),
         "parts": parts_out,
         "model_sequence_bp": len(seq_clean),
         "final_sequence_bp": len(final),
@@ -1480,10 +1559,11 @@ def apply_rag_substitution(
         "sequence_changed_from_model": sequence_changed,
         "assembly_audit": {
             "parsing_strategy": parsing_strategy,
-            "identified_queries": [q for (_, q) in queries],
-            "slot_count": len(queries),
+            "identified_queries": [q for (_, q) in queries_ordered],
+            "slot_count": len(queries_ordered),
             "slots_in_final_sequence": slot_audit,
             "final_sequence_bp": len(final),
-            "parsed_vs_assembled_slot_match": len(queries) == len(parts_out),
+            "parsed_vs_assembled_slot_match": len(queries_ordered) == len(parts_out),
         },
+        "map_slots": map_slots_out,
     }
