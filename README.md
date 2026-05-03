@@ -98,9 +98,10 @@ When **`PORT` is unset**, opens at **`http://127.0.0.1:8765/`** (or next free po
 
 ### Railway (single URL for judges)
 
-Ships **`Procfile`**, **`railway.toml`**, **`runtime.txt`**. Connect the GitHub repo and set **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** (and optional **`DGENE_GEMINI_MODEL`**) in Railway Variables.
+Ships **`Procfile`**, **`railway.toml`**, **`nixpacks.toml`**, and **`runtime.txt`**. Connect the GitHub repo and set **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** (and optional **`DGENE_GEMINI_MODEL`**) in Railway Variables.
 
-- **Process:** `python server.py` (**not** gunicorn — stdlib HTTP, not WSGI).
+- **Process:** `python server.py` (**not** `app.py` / Streamlit — Nixpacks otherwise auto-starts `app.py`). If logs show `ModuleNotFoundError: streamlit`, open **Service → Settings → Deploy → Custom Start Command** and set **`python server.py`**.
+- **Stack:** stdlib HTTP (**not** gunicorn — not WSGI).
 - **Health check:** `GET /api/health`
 - **RAM:** Prefer **≥ 2 GB**; first Chroma index build is heavy.
 - **Disk:** `.chroma_igem/` and snapshots are **ephemeral** across redeploys — first compile after deploy may be slower.
@@ -131,7 +132,7 @@ streamlit run app.py
 | [`app.py`](app.py) | Streamlit legacy playground |
 | [`igem_dataset.jsonl`](igem_dataset.jsonl) | Registry-derived parts corpus |
 | [`extract_igem_dataset.py`](extract_igem_dataset.py), [`generate_gemma_train.py`](generate_gemma_train.py) | Dataset / training JSONL builders |
-| [`railway.toml`](railway.toml), [`Procfile`](Procfile), [`runtime.txt`](runtime.txt) | Railway deploy hints |
+| [`railway.toml`](railway.toml), [`nixpacks.toml`](nixpacks.toml), [`Procfile`](Procfile), [`runtime.txt`](runtime.txt) | Railway / Nixpacks deploy hints |
 
 Gitignored / generated: `.chroma_igem/`, `.design_snapshots/`, `finetune_results/`, etc.
 

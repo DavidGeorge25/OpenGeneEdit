@@ -1,0 +1,3 @@
+# Nixpacks defaults to `python app.py` when app.py exists — override for the web compiler.
+[start]
+cmd = "python server.py"
