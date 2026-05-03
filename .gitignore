@@ -1,3 +1,7 @@
 finetune_results/
 .chroma_igem/
 .design_snapshots/
+
+# Local secrets — never commit
+.env
+.env.local
