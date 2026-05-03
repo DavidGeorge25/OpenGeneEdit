@@ -1,7 +1,7 @@
 """Typed intermediate representation for genetic-circuit designs.
 
 The point of this IR is to separate **what the user wants** (a boolean function over named
-inducers, expressed in a chosen reporter) from **how DGene wires it on a plasmid** (specific
+inducers, expressed in a chosen reporter) from **how OpenGeneEdit wires it on a plasmid** (specific
 cassettes drawn from a vetted parts catalog using a known topology). Everything downstream of
 ``CircuitSpec`` is deterministic and auditable: ``circuit_synth`` picks a topology, ``circuit_parts``
 fills in DNA, and ``circuit_verify`` proves the assembled cassette graph implements the requested

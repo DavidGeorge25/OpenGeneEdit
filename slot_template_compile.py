@@ -507,7 +507,7 @@ def candidate_from_slot_template(
         try:
             dna, trace = embed_slot_template_in_ecoli_backbone(dna, trace)
             thought += (
-                " · **Vector scaffold:** cassette inserted into the DGene E. coli RFC10 backbone "
+                " · **Vector scaffold:** cassette inserted into the OpenGeneEdit E. coli RFC10 backbone "
                 "(ColE1-class ori, chloramphenicol resistance, BioBrick MCS) matching `circuit_synth`."
             )
         except Exception as exc:

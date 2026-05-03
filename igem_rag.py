@@ -137,7 +137,7 @@ def rag_debug_log(line: str) -> None:
     if not rag_debug_enabled():
         return
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dgene/rag {ts}] {line}\n")
+    sys.stderr.write(f"[oge/rag {ts}] {line}\n")
     sys.stderr.flush()
     if _RAG_DEBUG_MIRROR is not None:
         try:
@@ -154,7 +154,7 @@ def rag_always_log(line: str) -> None:
     skipped.
     """
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dgene/rag {ts}] {line}\n")
+    sys.stderr.write(f"[oge/rag {ts}] {line}\n")
     sys.stderr.flush()
     if _RAG_DEBUG_MIRROR is not None:
         try:

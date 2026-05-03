@@ -1,4 +1,4 @@
-"""Inference layer for DGene — **Gemma 4 only.**
+"""Inference layer for OpenGeneEdit — **Gemma 4 only.**
 
 Backends:
 
@@ -23,7 +23,7 @@ Malformed model output fails the request (**no skipping** failed candidates).
 ``.env`` in this package directory is loaded on import (existing environment
 variables are not overwritten).
 
-Set ``DGENE_GEMINI_DEBUG=1`` for Gemini HTTP / retry stderr traces (``[dgene/infer]``).
+Set ``DGENE_GEMINI_DEBUG=1`` for Gemini HTTP / retry stderr traces (``[oge/infer]``).
 ``DGENE_DEBUG=1`` does not enable those lines (use it with RAG: see ``igem_rag`` / ``DGENE_RAG_DEBUG``).
 Restart the server after changing ``.env``.
 """
@@ -426,7 +426,7 @@ _GEMINI_API_BASE = (
 _GEMINI_STOP_SEQUENCES = ["</circuit>"]
 
 _GEMINI_SYSTEM_STOP_INSTRUCTION = (
-    "You are the DGene DNA compiler. Begin immediately: the FIRST characters you emit must "
+    "You are the OpenGeneEdit DNA compiler. Begin immediately: the FIRST characters you emit must "
     "be the literal text <|channel>thought — no preamble, greeting, markdown, bullets, "
     "asterisks, headings, or hidden planning. Never write lines starting with `*` or `-` "
     "or numbered lists; never use \"Wait,\" or step-checklists. Never echo scaffolding like "
@@ -464,7 +464,7 @@ def _pick_google_api_key() -> Optional[str]:
 def _gemini_prompt_template(user_design_brief: str) -> str:
     brief = user_design_brief.strip()
     return (
-        "You are DGene, a synthetic-biology DNA compiler. Read the user's circuit brief and "
+        "You are OpenGeneEdit, a synthetic-biology DNA compiler. Read the user's circuit brief and "
         "output ONE DNA construct solution. Your reply must match the worked example below "
         "exactly in structure — no other text, no markdown fences, no JSON, no YAML, no FASTA "
         "header.\n\n"
@@ -574,7 +574,7 @@ def infer_debug_log(line: str) -> None:
     if not infer_debug_enabled():
         return
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dgene/infer {ts}] {line}\n")
+    sys.stderr.write(f"[oge/infer {ts}] {line}\n")
     sys.stderr.flush()
 
 
@@ -584,7 +584,7 @@ def _infer_always_log(line: str) -> None:
     Used for high-signal events like parse failures so they are never silently swallowed.
     """
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dgene/infer {ts}] {line}\n")
+    sys.stderr.write(f"[oge/infer {ts}] {line}\n")
     sys.stderr.flush()
 
 
@@ -1162,7 +1162,7 @@ class GeminiBackend:
                 raise RuntimeError(
                     f"Hosted Gemma output for candidate {i} is not parseable after 3 retries "
                     "(expected `<|channel>thought … <channel|>` then a DNA string of A/C/G/T). "
-                    "See [dgene/infer] log lines above for the raw output that failed; "
+                    "See [oge/infer] log lines above for the raw output that failed; "
                     "set DGENE_MIN_PARSE_DNA_LEN=8 if the design is very short."
                 ) from exc
         infer_debug_log(
@@ -1296,7 +1296,7 @@ class GGUFBackend:
                 raise RuntimeError(
                     f"Local GGUF Gemma candidate {i} is not parseable "
                     "(expected `<|channel>thought … <channel|>` then ATCG). "
-                    "See [dgene/infer] log lines above for the raw output that failed."
+                    "See [oge/infer] log lines above for the raw output that failed."
                 ) from exc
             thought_ui = sanitize_thought_for_display(thought)
             yield Candidate(
@@ -1376,7 +1376,7 @@ def _create_inference_backend() -> object:
         return GGUFBackend(gguf_path)
 
     raise InferenceConfigurationError(
-        "DGene requires hosted Gemma 4 (GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL) "
+        "OpenGeneEdit requires hosted Gemma 4 (GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL) "
         "or local Gemma GGUF (DGENE_GGUF_PATH). No mock/offline inference is compiled in."
     )
 

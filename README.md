@@ -1,6 +1,8 @@
-# DGene
+# OpenGeneEdit
 
-**DGene** is a synthetic-biology oriented DNA “compiler”: you describe a genetic circuit in natural language, and the stack produces structured reasoning plus a nucleotide sequence, optional verification against real [iGEM](https://igem.org) registry parts (RAG), compiler-style checks, ranking, plasmid visualization, and FASTA / GenBank export.
+**OpenGeneEdit** is a synthetic-biology oriented DNA “compiler”: you describe a genetic circuit in natural language, and the stack produces structured reasoning plus a nucleotide sequence, optional verification against real [iGEM](https://igem.org) registry parts (RAG), compiler-style checks, ranking, plasmid visualization, and FASTA / GenBank export.
+
+Configuration env vars still use the **`DGENE_*`** prefix for backwards compatibility.
 
 Inference is powered by **Google Gemma 4 only** — either via the Gemini API or a local **GGUF** model.
 

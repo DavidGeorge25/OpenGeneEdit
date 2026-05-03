@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DGene compiler server — UI + /api/compile orchestration.
+"""OpenGeneEdit compiler server — UI + /api/compile orchestration.
 
 Pipeline per /api/compile request (default ``DGENE_COMPILE_MODE=circuit_synth``):
 
@@ -49,7 +49,7 @@ injected constraint, merges into the list, re-ranks, and returns ``fix`` metadat
 (``new_candidate_id``, ``new_candidate_index``, ``still_flagged``).
 
 **stderr:** High-frequency poll requests are hidden from the default access log (see ``DGENE_HTTP_LOG`` in ``.env.example``).
-Async jobs always print ``[dgene/server] job <id> · …`` when the worker starts, finishes, or fails.
+Async jobs always print ``[oge/server] job <id> · …`` when the worker starts, finishes, or fails.
 """
 from __future__ import annotations
 
@@ -342,9 +342,9 @@ def _finalize_compile_result(result: dict) -> dict:
     try:
         sid = _save_compile_snapshot(out)
         out["snapshot_id"] = sid
-        sys.stderr.write(f"[dgene/server] snapshot saved id={sid} → {_SNAPSHOT_DIR!r}\n")
+        sys.stderr.write(f"[oge/server] snapshot saved id={sid} → {_SNAPSHOT_DIR!r}\n")
     except Exception as exc:
-        sys.stderr.write(f"[dgene/server] snapshot save failed: {exc}\n")
+        sys.stderr.write(f"[oge/server] snapshot save failed: {exc}\n")
     return out
 
 
@@ -571,7 +571,7 @@ def _compile(
         candidates = run_rag_first_variants(prompt, n, progress_cb=compile_progress)
     elif mode in ("circuit_synth", "rag_first") and not rag_first_configured():
         sys.stderr.write(
-            "[dgene/server] "
+            "[oge/server] "
             f"DGENE_COMPILE_MODE={mode} but no GEMINI_API_KEY / GOOGLE_API_KEY — "
             "falling back to legacy channel compile.\n"
         )
@@ -711,13 +711,13 @@ def _server_debug(msg: str) -> None:
     ):
         return
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dgene/server {ts}] {msg}\n")
+    sys.stderr.write(f"[oge/server {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _job_lifecycle(job_id: str, msg: str) -> None:
     """Always-on high-signal line so long jobs and failures are visible in the terminal."""
-    sys.stderr.write(f"[dgene/server] job {job_id} · {msg}\n")
+    sys.stderr.write(f"[oge/server] job {job_id} · {msg}\n")
     sys.stderr.flush()
 
 
@@ -785,7 +785,7 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
             )
         elif job_mode in ("circuit_synth", "rag_first") and not rag_first_configured():
             sys.stderr.write(
-                f"[dgene/server] DGENE_COMPILE_MODE={job_mode} but no GEMINI_API_KEY / "
+                f"[oge/server] DGENE_COMPILE_MODE={job_mode} but no GEMINI_API_KEY / "
                 "GOOGLE_API_KEY — falling back to legacy channel compile.\n"
             )
             compile_progress(
@@ -920,7 +920,7 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DGeneCompiler/2.0"
+    server_version = "OpenGeneEditCompiler/2.0"
 
     def log_message(self, format: str, *args) -> None:
         """Suppress poll/health spam; set DGENE_HTTP_LOG=all to log every request."""
@@ -1140,7 +1140,7 @@ def main() -> None:
     except Exception as exc:
         print(f"[server] Backend init failed at boot: {exc}", file=sys.stderr)
 
-    print(f"DGene compiler UI: http://127.0.0.1:{port}/")
+    print(f"OpenGeneEdit compiler UI: http://127.0.0.1:{port}/")
     httpd.serve_forever()
 
 

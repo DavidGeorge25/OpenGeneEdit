@@ -108,7 +108,7 @@ def _throttled_get(url: str) -> bytes:
         _LAST_REQ_MONO = time.monotonic()
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "DGene/1.0 (synthetic biology compiler; +https://github.com)"},
+        headers={"User-Agent": "OpenGeneEdit/1.0 (synthetic biology compiler; +https://github.com)"},
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read()
@@ -150,7 +150,7 @@ def _save_cache() -> None:
 
 
 def _entrez_base_params() -> Dict[str, str]:
-    p: Dict[str, str] = {"tool": "dgene"}
+    p: Dict[str, str] = {"tool": "opengeneedit"}
     em = _email()
     if em:
         p["email"] = em

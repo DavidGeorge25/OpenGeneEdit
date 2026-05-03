@@ -92,8 +92,8 @@ def to_genbank(sequence: str, record_name: str = "compiled_sequence") -> str:
     )
 
 
-st.set_page_config(page_title="Synthetic Biology Compiler", layout="centered")
-st.title("Synthetic Biology Compiler")
+st.set_page_config(page_title="OpenGeneEdit", layout="centered")
+st.title("OpenGeneEdit")
 st.write("Enter a genetic circuit design prompt to generate reasoning and a plasmid map.")
 
 

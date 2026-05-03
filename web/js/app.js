@@ -1,4 +1,4 @@
-/** DGene web compiler — landing → split workspace (Claude-style artifact pane). */
+/** OpenGeneEdit web compiler — landing → split workspace (Claude-style artifact pane). */
 
 const $ = (id) => document.getElementById(id);
 
@@ -1818,7 +1818,7 @@ const COMPILE_PHASES = [
   {
     title: "Output contract",
     sub: "<|channel>thought · ATCG-only DNA strip",
-    ticker: "Locking DGene compiler output envelope…",
+    ticker: "Locking OpenGeneEdit compiler output envelope…",
     bar: 21,
     atMs: 950,
   },

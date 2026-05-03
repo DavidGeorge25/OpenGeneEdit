@@ -1,11 +1,13 @@
-# DGene — Technical overview (Google hackathon)
+# OpenGeneEdit — Technical overview (Google hackathon)
 
-**DGene** is a synthetic-biology–oriented DNA “compiler.” A user describes a genetic circuit in natural language; the system returns structured reasoning, a nucleotide sequence, and—depending on **`DGENE_COMPILE_MODE`**—either **topology-verified plasmids** built from a curated catalog, **RAG-first** constructs assembled only from **menu-retrieved registry DNA**, or **legacy** channel-tagged model DNA with **post-hoc** iGEM/NCBI slot substitution. Downstream: heuristic **compiler-style passes**, **multi-objective ranking** (pipeline tier + prompt fit + Pareto objectives), optional **design QA** (deterministic regulator lint + optional Gemma “PI review”), plasmid visualization, **FASTA / GenBank** export, and **bookmarkable compile snapshots**. Inference is **Google Gemma 4 only**: either via the **Gemini API** (hosted) or a local **GGUF** checkpoint loaded with `llama-cpp-python`.
+**OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler.” A user describes a genetic circuit in natural language; the system returns structured reasoning, a nucleotide sequence, and—depending on **`DGENE_COMPILE_MODE`**—either **topology-verified plasmids** built from a curated catalog, **RAG-first** constructs assembled only from **menu-retrieved registry DNA**, or **legacy** channel-tagged model DNA with **post-hoc** iGEM/NCBI slot substitution. Downstream: heuristic **compiler-style passes**, **multi-objective ranking** (pipeline tier + prompt fit + Pareto objectives), optional **design QA** (deterministic regulator lint + optional Gemma “PI review”), plasmid visualization, **FASTA / GenBank** export, and **bookmarkable compile snapshots**. Inference is **Google Gemma 4 only**: either via the **Gemini API** (hosted) or a local **GGUF** checkpoint loaded with `llama-cpp-python`.
 
 **Two model modes in practice**
 
 - **Stock Gemma 4 (hosted)** — The default path for most users is **standard instruction-tuned Gemma 4** on the Gemini API (e.g. `gemma-4-31b-it` via `DGENE_GEMINI_MODEL`). No local GPU required; the same channel-tagged prompt and parser are used. Quality follows the base model plus prompting.
 - **Fine-tuned Gemma 4 (local GGUF)** — The hackathon build also supports a **domain-specific fine-tune** trained on compiler-shaped examples derived from the iGEM parts corpus (see §3). That checkpoint is distributed as a **quantized `.gguf`** for self-hosted inference through `llama-cpp-python`. The app does not bundle the file; you download it (e.g. from Hugging Face) and point `DGENE_GGUF_PATH` at it.
+
+**Naming.** User-facing branding is **OpenGeneEdit**. Stderr log lines use the short prefix **`oge`** (e.g. **`[oge/server]`**, **`[oge/infer]`**, **`[oge/rag]`**). **`DGENE_*`** environment variables are unchanged so existing `.env` files keep working.
 
 This document walks through data acquisition, cleaning, model alignment / local weights, Hugging Face hosting, live demo, self-hosting, and how **compile modes** (**topology + hybrid padding**, **RAG-first**, **legacy**), **Chroma RAG**, **design QA**, snapshots, and ranking interact in **`server.py`** vs **`app.py`**.
 
@@ -439,7 +441,7 @@ Those four define the **composite** scalar (weighted sum: **expression 0.40**, *
 - **`GET /api/health`** — model id / **`backend_kind`** / hosted **`api_model_id`** or GGUF filename.
 - **Pipeline** (`_compile` / async job): **`DGENE_COMPILE_MODE`** branch (§1) → per candidate **`_ranked_row_from_candidate`**: skip **`apply_rag_substitution`** when **`rag.pipeline ∈ {circuit_synth, rag_first, slot_template}`** → **`run_passes`** → **`score_candidate`** → **`attach_fidelity_scores`** → global **`rank`** after all candidates (sync) or incremental **`rank`** on prefixes (async partials).
 - **Static** files from **`web/`** (HTML/CSS/JS): circular plasmid map with restriction sites, **full annulus base ring** + **gap underlay** for unannotated **`map_slots`** intervals, hover tooltips (leaders use **`pointer-events: none`** so segments receive hover), **⌘/Ctrl+scroll zoom** and **drag-pan** on the SVG viewport (`#plasmidSvg` / `#viewport`), **unverified `*`** markers, candidate table / Pareto chart, **partial compile** respects **selected candidate** (does not reset selection to **`best_id`** on every streaming update), FASTA/GenBank download mirroring **`app.py`** logic in JS.
-- **Access log noise:** Default suppresses **`/api/compile/status`** and **`/api/health`** lines — set **`DGENE_HTTP_LOG=all`** for full Apache-style logging. **`DGENE_SERVER_DEBUG=1`** adds **`[dgene/server HH:MM:SS]`** tracing.
+- **Access log noise:** Default suppresses **`/api/compile/status`** and **`/api/health`** lines — set **`DGENE_HTTP_LOG=all`** for full Apache-style logging. **`DGENE_SERVER_DEBUG=1`** adds **`[oge/server HH:MM:SS]`** tracing.
 
 ---
 
@@ -507,4 +509,4 @@ Those four define the **composite** scalar (weighted sum: **expression 0.40**, *
 
 ---
 
-*Technical writeup for the DGene codebase — Google hackathon submission.*
+*Technical writeup for the OpenGeneEdit codebase — Google hackathon submission.*
