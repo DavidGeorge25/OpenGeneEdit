@@ -26,6 +26,9 @@ Set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` for extra retrieval hit lists.
 Alias table (subset): ``luxR``→BBa_C0062, ``luxI``→BBa_C0061, ``plux``→BBa_R0062,
 ``mcherry``→BBa_E1010, ``j23100``→BBa_K4233030 (dataset snapshot has no BBa_J23100),
 ``b0034``→BBa_K812053 (no BBa_B0034), ``b0015``→BBa_B0015.
+
+**LLM tool bridge:** ``search_igem_registry_for_llm_tool`` wraps ``retrieve_parts`` for Gemini
+``functionResponse`` payloads (sequence previews to the model; full rows merged server-side).
 """
 from __future__ import annotations
 
@@ -352,6 +355,68 @@ def _lookup_part_by_exact_name(part_name: str) -> Optional[RetrievedPart]:
         sequence=str(meta.get("sequence", "")),
         similarity=1.0,
     )
+
+
+def search_igem_registry_for_llm_tool(args: dict) -> dict:
+    """Execute ``search_igem_registry`` tool args → structured hits for Gemini ``functionResponse``.
+
+    Returns ``{"parts": [...]}`` for the API (sequence previews only). Full rows for assembly /
+    UI merge are appended via ``inference.extend_igem_tool_merge_rows`` (thread-local buffer).
+    """
+
+    qraw = args.get("query")
+    query = str(qraw if qraw is not None else "").strip()
+    pt_raw = args.get("part_type")
+    part_type_filter: Optional[str] = None
+    if pt_raw is not None:
+        p = str(pt_raw).strip()
+        if p and p.casefold() not in ("any", "none", "unknown"):
+            if p in ("Promoter", "RBS", "CDS", "Terminator"):
+                part_type_filter = p
+    tk = args.get("top_k", 10)
+    try:
+        top_k = int(float(tk))
+    except (TypeError, ValueError):
+        top_k = 10
+    top_k = max(1, min(25, top_k))
+
+    hits = retrieve_parts(query, part_type_filter=part_type_filter, top_k=top_k)
+    preview_cap = 160
+    llm_parts: List[dict] = []
+    full_rows: List[dict] = []
+    for h in hits:
+        seq = str(h.sequence or "")
+        llm_parts.append(
+            {
+                "part_name": h.part_name,
+                "part_type": h.part_type,
+                "short_desc": (h.short_desc or "")[:380],
+                "sequence_bp": len(seq),
+                "sequence_preview": seq[:preview_cap] + ("…" if len(seq) > preview_cap else ""),
+                "similarity": round(float(h.similarity), 4),
+                "match_kind": getattr(h, "match_kind", "semantic"),
+            }
+        )
+        full_rows.append(
+            {
+                "part_name": h.part_name,
+                "part_type": h.part_type,
+                "short_desc": h.short_desc,
+                "sequence": seq,
+                "similarity": float(h.similarity),
+                "match_kind": getattr(h, "match_kind", "semantic"),
+                "retrieval_query": query,
+            }
+        )
+
+    try:
+        from inference import extend_igem_tool_merge_rows
+
+        extend_igem_tool_merge_rows(full_rows)
+    except Exception:
+        pass
+
+    return {"query": query, "part_type_filter": part_type_filter, "parts": llm_parts}
 
 
 def retrieve_parts(

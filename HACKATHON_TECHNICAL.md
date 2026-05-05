@@ -1,10 +1,10 @@
 # OpenGeneEdit — Technical overview (Google hackathon)
 
-**OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler.” A user describes a genetic circuit in natural language; the system returns structured reasoning, a nucleotide sequence, and—depending on **`DGENE_COMPILE_MODE`**—either **topology-verified plasmids** built from a curated catalog, **RAG-first** constructs assembled only from **menu-retrieved registry DNA**, or **legacy** channel-tagged model DNA with **post-hoc** iGEM/NCBI slot substitution. Downstream: heuristic **compiler-style passes**, **multi-objective ranking** (pipeline tier + prompt fit + Pareto objectives), optional **design QA** (deterministic regulator lint + optional Gemma “PI review”), plasmid visualization, **FASTA / GenBank** export, and **bookmarkable compile snapshots**. Inference is **Google Gemma 4 only**: either via the **Gemini API** (hosted) or a local **GGUF** checkpoint loaded with `llama-cpp-python`.
+**OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler.” A user describes a genetic circuit in natural language; the system returns structured reasoning, a nucleotide sequence, and—depending on **`DGENE_COMPILE_MODE`**—either **topology-verified plasmids** built from a curated catalog, **RAG-first** constructs assembled only from **menu-retrieved registry DNA** (with optional **native Gemini function calling** so hosted Gemma can run extra **`search_igem_registry`** Chroma lookups mid-compile), or **legacy** channel-tagged model DNA with **post-hoc** iGEM/NCBI slot substitution. Downstream: heuristic **compiler-style passes**, **multi-objective ranking** (pipeline tier + prompt fit + Pareto objectives), optional **design QA** (deterministic regulator lint + optional Gemma “PI review”), plasmid visualization, **FASTA / GenBank** export, and **bookmarkable compile snapshots**. Inference is **Google Gemma 4 only**: either via the **Gemini API** (hosted) or a local **GGUF** checkpoint loaded with `llama-cpp-python`.
 
 **Two model modes in practice**
 
-- **Stock Gemma 4 (hosted)** — The default path for most users is **standard instruction-tuned Gemma 4** on the Gemini API (e.g. `gemma-4-31b-it` via `DGENE_GEMINI_MODEL`). No local GPU required; the same channel-tagged prompt and parser are used. Quality follows the base model plus prompting.
+- **Stock Gemma 4 (hosted)** — The default path for most users is **standard instruction-tuned Gemma 4** on the Gemini API (e.g. `gemma-4-31b-it` via `DGENE_GEMINI_MODEL`). No local GPU required; the same channel-tagged prompt and parser are used. Quality follows the base model plus prompting. The **RAG-first menu compiler** (`circuit_rag_first.run_compiler`) additionally exposes **`search_igem_registry`** as a **native `functionDeclaration`**: multi-turn **`generateContent`** with **`functionCall` / `functionResponse`** executes **`retrieve_parts`** server-side (see §4.2, §5).
 - **Fine-tuned Gemma 4 (local GGUF)** — The hackathon build also supports a **domain-specific fine-tune** trained on compiler-shaped examples derived from the iGEM parts corpus (see §3). That checkpoint is distributed as a **quantized `.gguf`** for self-hosted inference through `llama-cpp-python`. The app does not bundle the file; you download it (e.g. from Hugging Face) and point `DGENE_GGUF_PATH` at it.
 
 **Naming.** User-facing branding is **OpenGeneEdit**. Stderr log lines use the short prefix **`oge`** (e.g. **`[oge/server]`**, **`[oge/infer]`**, **`[oge/rag]`**). **`DGENE_*`** environment variables are unchanged so existing `.env` files keep working.
@@ -65,7 +65,7 @@ If `circuit_synth` or `rag_first` is selected but **no** `GEMINI_API_KEY` / `GOO
 
 | Module | Role |
 |--------|------|
-| `inference.py` | Backend selection, Gemma prompting, parsing `<|channel>thought` / `<channel|>` / DNA / `</circuit>`; loads `.env` on import |
+| `inference.py` | Backend selection, Gemma prompting, parsing `<|channel>thought` / `<channel|>` / DNA / `</circuit>`; hosted **`generateContent`** + optional **SSE** streaming; **native `search_igem_registry` tool loop** (`functionDeclarations` + multi-turn `functionResponse`); loads `.env` on import |
 | `igem_rag.py` | JSONL → ChromaDB index; retrieval; **slot-based** merge (legacy); registry token vocabulary; NCBI handoff; RAG-first menu retrieval |
 | `ncbi_gene.py` | NCBI Entrez (Gene → genomic slice) for bacterial loci when iGEM does not verify a slot |
 | `passes.py` | ORF, GC, repeats, Type IIS, restriction map, CAI, RBS heuristic, hairpins, etc. |
@@ -80,7 +80,7 @@ If `circuit_synth` or `rag_first` is selected but **no** `GEMINI_API_KEY` / `GOO
 | `circuit_synth.py` | Deterministic topology + sequences from `igem_dataset.jsonl` / catalog BBa IDs |
 | `circuit_verify.py` | Regulatory-graph fixpoint vs requested truth table; failure ⇒ no verified candidate |
 | `circuit_pipeline.py` | **`compile_hybrid_variants` / `_iter`**: up to one verified `circuit_synth` candidate, then `run_rag_first_*` for diversity |
-| `circuit_rag_first.py` | Intent JSON → flatten retrieval queries → **`build_part_menu`** → **`run_compiler`** (`<reasoning>` + `ORDERED_PART_LIST` + `</circuit_design>`) → **`parse_ordered_bba`** (never scans free-form CoT for BBa) → **`assemble_sequence`** |
+| `circuit_rag_first.py` | Intent JSON → flatten retrieval queries → **`build_part_menu`** → **`run_compiler`** (hosted Gemma with optional **`search_igem_registry`** tool calls + `<reasoning>` + `ORDERED_PART_LIST` + `</circuit_design>`) → **`parse_ordered_bba`** → **`assemble_sequence`** |
 | `slot_template_compile.py` | Deterministic Promoter/RBS/CDS/Terminator cassette from per-type retrieval when intent exposes `gate` / `input_analytes` / `reporter`; optional backbone embed (§5.9) |
 | `design_expert_lint.py` | Rule-based check: regulated promoters in the ordered list must include cognate regulator CDS (`circuit_parts` PROMOTERS/TFS); emits `rag.expert_lint` |
 | `expert_review.py` | Optional hosted Gemma JSON “PI review” of brief + ordered BBa list (`DGENE_EXPERT_REVIEW`) → `rag.expert_review` |
@@ -204,6 +204,7 @@ Both entry points use the same `inference.get_backend()` logic once `.env` is lo
 ### 4.2 Hosted Gemma (`GeminiBackend`)
 
 - REST **`generateContent`** / optional **SSE `streamGenerateContent`** to the Generative Language API (`urllib` only).
+- **Native function calling — `search_igem_registry`:** **`generate_text_gemma4_custom(..., igem_tools=True)`** (used by **`circuit_rag_first.run_compiler`**) attaches **`tools[].functionDeclarations`** and **`toolConfig.functionCallingConfig.mode=AUTO`**. The Python client loops: **model `functionCall`** → execute **`igem_rag.search_igem_registry_for_llm_tool`** (Chroma via **`retrieve_parts`**) → **`functionResponse`** → repeat until the model emits plain text. Tool rounds are **non-streaming** (always `generateContent`, never SSE), regardless of **`DGENE_GEMINI_STREAM`**. Cap alternating rounds with **`DGENE_GEMINI_TOOL_ROUNDS`** (default **8**). Set **`DGENE_GEMINI_IGEM_TOOLS=0`** to disable tools even when the compiler requests them.
 - **System instruction** constrains the model to a single rigid format: opening `<|channel>thought`, one short prose paragraph (no bullets), `<channel|>`, one continuous DNA line (A/C/G/T, no spaces), then `</circuit>`.
 - **Stop sequence** `</circuit>` limits runaway generation.
 - **Default `maxOutputTokens`** for hosted calls is **8192** (override with `DGENE_GEMINI_MAX_OUTPUT` for very long single-piece sequences; excessively large caps slow compiles by encouraging pre-`</circuit>` rambling).
@@ -226,11 +227,13 @@ Both entry points use the same `inference.get_backend()` logic once `.env` is lo
 
 ## 5. iGEM RAG + NCBI fallback — `igem_rag.py` and `ncbi_gene.py`
 
-There are **two** retrieval-heavy mechanisms:
+There are **three** retrieval-heavy mechanisms:
 
 1. **Legacy post-hoc substitution (`apply_rag_substitution`)** — Runs **only** when the candidate came from **channel DNA** (`DGENE_COMPILE_MODE=legacy` or API-key fallback). After Gemma emits a full sequence, the compiler splits it into **N proportional chunks** (one per discovered ordered slot) and tries to **replace each slice** with registry or NCBI DNA when verification thresholds pass.
 
-2. **RAG-first menu retrieval (`circuit_rag_first.build_part_menu`)** — Runs **before** the Gemma “compiler” call: queries Chroma from flattened **`intent.roles[].retrieval_queries`**, merges unique **`BBa_`** rows into a numbered menu, and mandates that **`ORDERED_PART_LIST`** DNA come **only** from those rows (+ optional **`assemble_sequence` fallback** direct lookup in `igem_dataset.jsonl`). No proportional substitution step exists on this path.
+2. **RAG-first menu retrieval (`circuit_rag_first.build_part_menu`)** — Runs **before** the Gemma “compiler” call: queries Chroma from flattened **`intent.roles[].retrieval_queries`**, merges unique **`BBa_`** rows into a numbered menu. Initial **`ORDERED_PART_LIST`** picks should favor those **`BBa_`** rows; **`assemble_sequence`** resolves DNA from **`menu_by_name`** (including rows merged from **`search_igem_registry`** tool hits — §5 mechanism **3**) or falls back to **`igem_dataset.jsonl`**. No proportional substitution step exists on this path.
+
+3. **On-demand registry search (hosted compiler tools)** — During **`run_compiler`**, hosted Gemma may invoke **`search_igem_registry`** via **`functionCall`**. **`inference.py`** executes **`igem_rag.search_igem_registry_for_llm_tool`** (same **`retrieve_parts`** stack as the menu builder), returns compact previews in **`functionResponse`**, and merges full sequences into **`menu_by_name`** for **`assemble_sequence`** trace metadata. Opt out with **`DGENE_GEMINI_IGEM_TOOLS=0`**.
 
 ### 5.1 Why slot count matters (equal-chunk pitfall)
 
@@ -386,7 +389,7 @@ This path powers **`DGENE_COMPILE_MODE=rag_first`** entirely and **`circuit_synt
 |------|----------------|
 | **1 · Intent** | **`extract_intent_json`** — Gemma with **`_INTENT_SYSTEM`** emits JSON (`gate`, `input_analytes`, `reporter`, **`roles[]` with `retrieval_queries[]`**, chassis, logic_summary). Missing newer keys back-filled (**`unknown`**, empty lists). |
 | **2 · Menu** | **`build_part_menu`** — **`ensure_indexed()`**, **`_flatten_retrieval_queries`** (always adds generic anchors like “strong RBS”, AND-gate English queries when roles sparse), **`retrieve_parts`** per query with **`top_k = DGENE_RAG_FIRST_TOP_K`** (default **15**, clamped **1–50**). Dedupe by **`part_name`**; stable sort Promoter→RBS→…→Terminator for prompt readability. |
-| **3–4 · Compiler** | **`run_compiler`** — User message bundles brief + truncated intent JSON + numbered menu. **`_COMPILER_SYSTEM`** demands **`<reasoning>...</reasoning>`**, blank-line **`ORDERED_PART_LIST`**, one **`BBa_`** per line (digit runs **`\\d{4,}`** for long BBa IDs), **`</circuit_design>`** stop. **`stop_sequences`** includes **`</circuit_design>`**. **`DGENE_RAG_FIRST_COMPILER_MAX_TOKENS`** default **3072**. |
+| **3–4 · Compiler** | **`run_compiler`** — User message bundles brief + truncated intent JSON + numbered menu. **`_COMPILER_SYSTEM`** demands **`<reasoning>...</reasoning>`**, blank-line **`ORDERED_PART_LIST`**, one **`BBa_`** per line, **`</circuit_design>`** stop. Hosted call uses **`generate_text_gemma4_custom(..., igem_tools=True)`**: optional **`search_igem_registry`** **`functionCall`** rounds (§4.2) before final text; **`_merge_igem_tool_rows_into`** folds tool hits into **`menu_by_name`**. **`stop_sequences`** includes **`</circuit_design>`**. **`DGENE_RAG_FIRST_COMPILER_MAX_TOKENS`** default **3072**. |
 | **5 · Parse** | **`parse_ordered_bba`** — Never scans model chatter above **`ORDERED_PART_LIST`** except **`BBa_` extraction fallback when marker exists**. **`_COMPILER_PARSE_RETRY_SUFFIX`** triggers one colder **`run_compiler`** pass if list empty. |
 | **6 · Caps** | **`DGENE_RAG_FIRST_MAX_PARTS`** default **48** — **`RuntimeError`** if exceeded (runaway enumeration guard). |
 | **7 · DNA** | **`assemble_sequence`** — Concatenate **`sequence`** fields preferring **`menu_by_name`**, else **`igem_dataset.jsonl`** index; **`trace`** rows carry **`start_bp`/`end_bp`**, **`source`** **`menu`/`jsonl`/`missing`**. |
@@ -463,7 +466,8 @@ Those four define the **composite** scalar (weighted sum: **expression 0.40**, *
 | `DGENE_INFERENCE` | `auto`, `gemini`, `gguf`, … |
 | `DGENE_IGEM_JSONL`, `DGENE_CHROMA_PATH`, `DGENE_RAG`, `DGENE_RAG_MIN_SIM`, `DGENE_RAG_MIN_SIM_PROMOTER` | RAG corpus + Chroma dir + master toggle + legacy substitution floors (promoter slot uses **max** of the two sim vars — §5.5); registry token + NCBI JSON caches live under **`DGENE_CHROMA_PATH`** |
 | `NCBI_API_KEY` / `DGENE_NCBI_API_KEY`, `DGENE_NCBI_EMAIL`, `DGENE_NCBI`, `DGENE_NCBI_ORGANISMS`, `DGENE_NCBI_PROMOTER_SLOTS` | NCBI Gene fallback (§5.6) |
-| `DGENE_GEMINI_STREAM`, `DGENE_GEMINI_STREAM_EARLY_CLOSE`, `DGENE_GEMINI_PARALLEL`, `DGENE_GEMINI_MAX_WORKERS`, `DGENE_GEMINI_MAX_OUTPUT` | Hosted streaming, SSE early close, parallelism, pool size, per-candidate output token cap (default **8192**) |
+| `DGENE_GEMINI_STREAM`, `DGENE_GEMINI_STREAM_EARLY_CLOSE`, `DGENE_GEMINI_PARALLEL`, `DGENE_GEMINI_MAX_WORKERS`, `DGENE_GEMINI_MAX_OUTPUT` | Hosted streaming, SSE early close, parallelism, pool size, per-candidate output token cap (default **8192**). **Note:** tool rounds (**`search_igem_registry`**) ignore streaming and always use blocking **`generateContent`**. |
+| `DGENE_GEMINI_IGEM_TOOLS`, `DGENE_GEMINI_TOOL_ROUNDS` | **`1`** (default) / **`true`** — allow native **`search_igem_registry`** on **`run_compiler`**; **`0`** / **`false`** — disable. **`DGENE_GEMINI_TOOL_ROUNDS`** — max tool/chat alternations per compiler call (default **8**, clamped **1–24**). |
 | `DGENE_COMPILE_MODE` | `circuit_synth` (default): verified boolean topology + RAG-first padding (optional **slot-template** first variant, §5.9); `rag_first`; `legacy` |
 | `DGENE_RAG_FIRST_TOP_K`, `DGENE_RAG_FIRST_MAX_PARTS`, `DGENE_RAG_FIRST_COMPILER_MAX_TOKENS`, `DGENE_RAG_FIRST_REASONING_CHARS`, `DGENE_RAG_FIRST_REASONING_SENTENCES` | RAG-first menu size, BBa order cap, compiler token budget, reasoning summary clip (`circuit_rag_first.py`) |
 | `DGENE_SLOT_TEMPLATE`, `DGENE_SLOT_TEMPLATE_MIN_SIM`, `DGENE_SLOT_TEMPLATE_MAX_PROMOTER_BP`, `DGENE_SLOT_TEMPLATE_EMBED_BACKBONE` | §5.9 slot-template path |
@@ -472,7 +476,7 @@ Those four define the **composite** scalar (weighted sum: **expression 0.40**, *
 | `DGENE_HTTP_LOG`, `DGENE_SERVER_DEBUG`, `DGENE_GEMINI_DEBUG`, `DGENE_RAG_DEBUG` / `DGENE_DEBUG` | Logging / tracing switches (§8, `igem_rag.py`) |
 | `PORT` | HTTP bind (**8765** default; server may walk upward **31** ports if busy) |
 
-**Fine-tuned GGUF:** **`circuit_synth`**, **`rag_first`**, slot-template, **`/api/fix`**, **`expert_review`**, and both **`extract_*_json`** intent passes call **`generate_text_gemma4_custom`** against the **Gemini API** — they **do not** route through **`GGUFBackend`** today. A machine can use GGUF for **`DGENE_COMPILE_MODE=legacy`** channel compiles while still setting **`GEMINI_API_KEY`** for topology/menu paths.
+**Fine-tuned GGUF:** **`circuit_synth`**, **`rag_first`**, slot-template, **`/api/fix`**, **`expert_review`**, and both **`extract_*_json`** intent passes call **`generate_text_gemma4_custom`** against the **Gemini API** — they **do not** route through **`GGUFBackend`** today. **Native `search_igem_registry` tools** run **only** on the **RAG-first menu compiler** (`run_compiler` with **`igem_tools=True`**). A machine can use GGUF for **`DGENE_COMPILE_MODE=legacy`** channel compiles while still setting **`GEMINI_API_KEY`** for topology/menu paths.
 
 **.env loading:** `inference.py` reads repo-root **`.env`** on import (**does not override** variables already present in `os.environ`). **Restart** `python3 server.py` after editing `.env` so subprocess picks up `NCBI_API_KEY` and other additions.
 

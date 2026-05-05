@@ -1,7 +1,8 @@
 """RAG-first compile pipeline: retrieve registry parts before the LLM; DNA is assembled only from JSONL.
 
 Flow: extract biological intent (Gemma) → Chroma retrieval (top-k per query) → compiler prompt with
-part menu → ordered BBa list from Gemma → concatenate ``sequence`` fields from the registry.
+part menu → Gemma may issue native ``search_igem_registry`` tool calls for extra Chroma lookups →
+ordered BBa list → concatenate ``sequence`` fields from the registry.
 
 Requires hosted Gemma (same API key as ``inference.generate_text_gemma4``). The **default** web compile
 mode is ``DGENE_COMPILE_MODE=circuit_synth`` (:mod:`circuit_pipeline`); set ``DGENE_COMPILE_MODE=rag_first``
@@ -273,7 +274,8 @@ End your reply immediately after the closing brace }.
 _COMPILER_SYSTEM = """You are a genetic circuit compiler for BioBrick-style DNA.
 
 Input: user brief + JSON intent + a numbered menu of registry parts (BBa IDs, types, descriptions, lengths). \
-All DNA in the final construct must come only from menu sequences.
+You also have an optional tool **search_igem_registry** that queries the same local iGEM index when you need \
+additional verified BBa candidates not shown in the menu (or want filtered alternates by part type).
 
 Output format — copy this structure exactly (no markdown headings, no LaTeX, no nested bullet essays):
 
@@ -297,7 +299,8 @@ Hard rules:
 - One linear construct only (typically 6–24 lines under ORDERED_PART_LIST). No alternatives, no repeated blocks.
 - Every line under ORDERED_PART_LIST must contain exactly one BBa_ id and nothing else except an optional (note).
 - You may prefix each line with a list number like `1.` or `2)` if helpful.
-- Do NOT print DNA bases. Do NOT invent BBa IDs absent from the menu.
+- Do NOT print DNA bases. Do NOT invent BBa IDs: every ID must appear either in the numbered menu **or** in a **search_igem_registry** tool result for this turn.
+- Prefer the menu when it suffices; call **search_igem_registry** sparingly (typically 1–3 focused queries).
 - Stop immediately after the line </circuit_design>
 """
 
@@ -466,6 +469,17 @@ def _format_menu_for_prompt(menu: List[dict]) -> str:
     return "\n".join(lines)
 
 
+def _merge_igem_tool_rows_into(by_name: Dict[str, dict]) -> None:
+    """Fold native-tool Chroma hits into the menu map so assembly retains similarity metadata."""
+
+    from inference import drain_igem_tool_merge_rows
+
+    for row in drain_igem_tool_merge_rows():
+        pn = str(row.get("part_name", "")).strip()
+        if pn and pn not in by_name:
+            by_name[pn] = row
+
+
 def run_compiler(
     user_prompt: str,
     menu: List[dict],
@@ -474,6 +488,7 @@ def run_compiler(
     temperature: float = 0.35,
     progress_cb: Optional[Callable[[str], None]] = None,
     extra_user_suffix: str = "",
+    menu_by_name: Optional[Dict[str, dict]] = None,
 ) -> str:
     from inference import generate_text_gemma4_custom
 
@@ -488,14 +503,18 @@ def run_compiler(
     )
     if extra_user_suffix.strip():
         user = f"{user}\n\n{extra_user_suffix.strip()}"
-    return generate_text_gemma4_custom(
+    raw = generate_text_gemma4_custom(
         user,
         system_instruction=_COMPILER_SYSTEM,
         temperature=temperature,
         max_output_tokens=rag_first_compiler_max_output_tokens(),
         stop_sequences=["</circuit_design>"],
         debug_ctx="rag_first_compiler",
+        igem_tools=True,
     )
+    if menu_by_name is not None:
+        _merge_igem_tool_rows_into(menu_by_name)
+    return raw
 
 
 def _fallback_one_bba_per_line(section_lines: List[str]) -> List[str]:
@@ -774,6 +793,7 @@ def run_rag_first_single(
         intent,
         temperature=temperature,
         progress_cb=progress_cb,
+        menu_by_name=by_name,
     )
     ordered = parse_ordered_bba(compiler_out)
     if not ordered:
@@ -788,6 +808,7 @@ def run_rag_first_single(
             temperature=min(0.12, temperature),
             progress_cb=progress_cb,
             extra_user_suffix=_COMPILER_PARSE_RETRY_SUFFIX,
+            menu_by_name=by_name,
         )
         ordered = parse_ordered_bba(compiler_out)
     if not ordered:
@@ -895,6 +916,7 @@ def run_rag_first_variants_iter(
                 intent,
                 temperature=temp,
                 progress_cb=progress_cb,
+                menu_by_name=by_name,
             )
             ordered = parse_ordered_bba(compiler_out)
             if not ordered:
@@ -909,6 +931,7 @@ def run_rag_first_variants_iter(
                     temperature=min(0.12, temp),
                     progress_cb=progress_cb,
                     extra_user_suffix=_COMPILER_PARSE_RETRY_SUFFIX,
+                    menu_by_name=by_name,
                 )
                 ordered = parse_ordered_bba(compiler_out)
             if not ordered:

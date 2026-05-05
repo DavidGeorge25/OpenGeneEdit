@@ -5,6 +5,8 @@ Backends:
   • **Hosted Gemma 4**: ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` / ``DGENE_GOOGLE_API_KEY``
     plus ``DGENE_GEMINI_MODEL`` (e.g. ``gemma-4-31b-it``). Calls the Google
     Generative Language ``generateContent`` API (stdlib ``urllib`` only).
+    **RAG-first menu compiler** may attach native ``search_igem_registry``
+    ``functionDeclarations`` (multi-turn tool loop — non-streaming).
 
   • **Local Gemma GGUF**: ``DGENE_GGUF_PATH`` pointing at a ``.gguf`` file plus
     ``llama-cpp-python``.
@@ -42,7 +44,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -906,6 +908,246 @@ def _apply_gemini_stop_sequences(gen_cfg: dict) -> None:
     gen_cfg["stopSequences"] = list(_GEMINI_STOP_SEQUENCES)
 
 
+# Thread-local buffer: tool hits from ``search_igem_registry`` merges into RAG-first ``by_name``.
+_IGEM_TOOL_ROWS_LOCAL = threading.local()
+
+
+def reset_igem_tool_merge_rows() -> None:
+    _IGEM_TOOL_ROWS_LOCAL.rows = []
+
+
+def extend_igem_tool_merge_rows(rows: List[dict]) -> None:
+    if not rows:
+        return
+    cur = getattr(_IGEM_TOOL_ROWS_LOCAL, "rows", None)
+    if cur is None:
+        cur = []
+        _IGEM_TOOL_ROWS_LOCAL.rows = cur
+    cur.extend(rows)
+
+
+def drain_igem_tool_merge_rows() -> List[dict]:
+    cur = getattr(_IGEM_TOOL_ROWS_LOCAL, "rows", None)
+    if not cur:
+        _IGEM_TOOL_ROWS_LOCAL.rows = []
+        return []
+    out = list(cur)
+    _IGEM_TOOL_ROWS_LOCAL.rows = []
+    return out
+
+
+_GEMINI_IGEM_REGISTRY_TOOL_DECL = {
+    "name": "search_igem_registry",
+    "description": (
+        "Search the local indexed iGEM BioBrick registry (Chroma + embeddings over tens of "
+        "thousands of parts). Use when the numbered menu is missing a candidate you need, "
+        "or you want alternates of a given type. Returns verified BBa part names and metadata "
+        "(sequence previews only — full DNA is assembled server-side)."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {
+                "type": "STRING",
+                "description": (
+                    "Search phrase: gene name, promoter nickname, analyte, organism, or BBa id."
+                ),
+            },
+            "part_type": {
+                "type": "STRING",
+                "description": (
+                    "Optional filter. One of: Promoter, RBS, CDS, Terminator. "
+                    "Omit or use any for all types."
+                ),
+            },
+            "top_k": {
+                "type": "INTEGER",
+                "description": "Maximum hits (1–25). Default 10.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+def _gemini_tool_round_limit() -> int:
+    raw = os.environ.get("DGENE_GEMINI_TOOL_ROUNDS", "").strip()
+    try:
+        return max(1, min(24, int(raw)))
+    except ValueError:
+        return 8
+
+
+def _gemini_post_json_with_retries(
+    api_key: str, model_id: str, body: dict, *, debug_ctx: str = ""
+) -> dict:
+    """POST ``generateContent`` (non-streaming) with the same backoff policy as text completions."""
+
+    delay = 1.0
+    last_err: Optional[RuntimeError] = None
+    tag = f"{debug_ctx} " if debug_ctx else ""
+    for attempt in range(8):
+        infer_debug_log(f"{tag}POST json retry attempt {attempt + 1}/8")
+        if attempt > 0:
+            compile_progress(f"gemma · HTTP retry {attempt + 1}/8 (backoff)…")
+        try:
+            return _gemini_post(api_key, model_id, body, debug_ctx=debug_ctx)
+        except (RuntimeError, OSError, urllib.error.URLError) as exc:
+            last_err = exc if isinstance(exc, RuntimeError) else RuntimeError(str(exc))
+            msg = str(last_err)
+            transient = _gemini_error_is_transient(msg)
+            if isinstance(exc, OSError) and exc.errno in (
+                errno.ETIMEDOUT,
+                errno.ECONNRESET,
+                errno.EPIPE,
+                errno.ECONNREFUSED,
+            ):
+                transient = True
+            infer_debug_log(
+                f"{tag}caught {type(exc).__name__}: transient={transient} msg={msg[:300]}"
+            )
+            if attempt < 7 and transient:
+                jitter = random.uniform(0.0, 0.5)
+                sleep_s = delay + jitter
+                infer_debug_log(f"{tag}backing off {sleep_s:.2f}s (delay was {delay:.1f}s)")
+                time.sleep(sleep_s)
+                delay = min(delay * 2, 120.0)
+                continue
+            raise last_err from None
+
+    raise last_err or RuntimeError("Gemma API request failed.")  # pragma: no cover
+
+
+def _gemini_first_candidate_content(payload: dict) -> Optional[dict]:
+    cands = payload.get("candidates") or []
+    if not cands:
+        return None
+    c0 = cands[0]
+    if isinstance(c0, dict):
+        return c0.get("content")
+    return None
+
+
+def _gemini_parts_extract_function_calls(parts: object) -> List[dict]:
+    out: List[dict] = []
+    if not isinstance(parts, list):
+        return out
+    for p in parts:
+        if isinstance(p, dict) and "functionCall" in p:
+            out.append(p["functionCall"])
+    return out
+
+
+def _gemini_parts_extract_text(parts: object) -> str:
+    blobs: List[str] = []
+    if not isinstance(parts, list):
+        return ""
+    for p in parts:
+        if isinstance(p, dict) and p.get("text") is not None:
+            blobs.append(str(p["text"]))
+    return "".join(blobs)
+
+
+def _execute_declared_gemini_tool(name: Optional[str], args: object) -> dict:
+    if name != "search_igem_registry":
+        return {"error": f"unsupported tool {name!r}"}
+    if not isinstance(args, dict):
+        args = {}
+    from igem_rag import search_igem_registry_for_llm_tool
+
+    return search_igem_registry_for_llm_tool(args)
+
+
+def _gemini_generate_custom_with_igem_tools(
+    api_key: str,
+    model_id: str,
+    prompt_text: str,
+    system_instruction: str,
+    temperature: float,
+    max_out: int,
+    *,
+    stop_sequences: Optional[List[str]] = None,
+    debug_ctx: str = "",
+) -> str:
+    """Multi-turn ``generateContent`` with ``search_igem_registry`` — **non-streaming** only."""
+
+    gen_cfg: dict = {"temperature": temperature, "maxOutputTokens": max_out}
+    _apply_optional_thinking_config(gen_cfg)
+    if stop_sequences is None:
+        _apply_gemini_stop_sequences(gen_cfg)
+    elif len(stop_sequences) > 0:
+        gen_cfg["stopSequences"] = list(stop_sequences)
+
+    contents: List[dict] = [
+        {"role": "user", "parts": [{"text": prompt_text.strip()}]},
+    ]
+    tools_body = {
+        "tools": [{"functionDeclarations": [_GEMINI_IGEM_REGISTRY_TOOL_DECL]}],
+        "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+    }
+    rounds = _gemini_tool_round_limit()
+    tag_base = debug_ctx or "igem_tools"
+
+    for round_ix in range(rounds):
+        compile_progress(
+            f"gemma · tool round {round_ix + 1}/{rounds} · {tag_base} "
+            f"(native search_igem_registry)…"
+        )
+        body: Dict[str, Any] = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": system_instruction.strip()}]},
+            "generationConfig": gen_cfg,
+            **tools_body,
+        }
+        payload = _gemini_post_json_with_retries(
+            api_key,
+            model_id,
+            body,
+            debug_ctx=f"{debug_ctx}·tr{round_ix}",
+        )
+        content = _gemini_first_candidate_content(payload)
+        if not content:
+            fb = payload.get("promptFeedback")
+            raise RuntimeError(f"Gemini returned no candidate content — promptFeedback: {fb!r}")
+
+        parts = content.get("parts") or []
+        model_turn = dict(content)
+        if not model_turn.get("role"):
+            model_turn["role"] = "model"
+        contents.append(model_turn)
+
+        calls = _gemini_parts_extract_function_calls(parts)
+        if not calls:
+            text = _gemini_parts_extract_text(parts).strip()
+            if text:
+                infer_debug_log(
+                    f"{debug_ctx} · tool loop done · rounds={round_ix + 1} · chars={len(text)}"
+                )
+                return text
+            raise RuntimeError(
+                "Gemma returned an empty text reply after tool rounds — "
+                f"parts={parts!r}"
+            )
+
+        response_parts: List[dict] = []
+        for fc in calls:
+            if not isinstance(fc, dict):
+                continue
+            fname = fc.get("name")
+            fargs = fc.get("args")
+            result = _execute_declared_gemini_tool(fname, fargs)
+            response_parts.append(
+                {"functionResponse": {"name": fname or "unknown", "response": result}}
+            )
+            infer_debug_log(f"{debug_ctx} · tool exec · {fname!r} · keys={list(result.keys())}")
+
+        contents.append({"role": "user", "parts": response_parts})
+
+    raise RuntimeError(
+        f"Gemma tool loop exceeded DGENE_GEMINI_TOOL_ROUNDS ({rounds}) — last debug_ctx={debug_ctx!r}"
+    )
+
+
 def _gemini_generate_text_with_retries(
     api_key: str, model_id: str, body: dict, *, debug_ctx: str = ""
 ) -> str:
@@ -1025,10 +1267,15 @@ def generate_text_gemma4_custom(
     max_output_tokens: Optional[int] = None,
     stop_sequences: Optional[List[str]] = None,
     debug_ctx: str = "generate_text_gemma4_custom",
+    igem_tools: bool = False,
 ) -> str:
-    """Single completion with full control over system prompt (RAG-first pipeline, tools, etc.).
+    """Single completion with full control over system prompt (RAG-first pipeline, optional tools).
 
     Pass ``stop_sequences=[]`` to disable stop sequences (needed for JSON intent extraction).
+
+    ``igem_tools``: attach native Gemini ``functionDeclarations`` for ``search_igem_registry``
+    (Chroma-backed). Uses multi-turn ``generateContent`` (**non-streaming**). Disable globally with
+    ``DGENE_GEMINI_IGEM_TOOLS=0``.
     """
 
     key = _pick_google_api_key()
@@ -1042,16 +1289,30 @@ def generate_text_gemma4_custom(
         if max_output_tokens is not None
         else _gemini_max_output_tokens()
     )
-    text = _gemini_generate_custom(
-        key,
-        mid,
-        user_message.strip(),
-        system_instruction,
-        temperature,
-        max_out,
-        stop_sequences=stop_sequences,
-        debug_ctx=debug_ctx,
-    ).strip()
+    use_tools = bool(igem_tools) and _gemini_env_bool("DGENE_GEMINI_IGEM_TOOLS", True)
+    if use_tools:
+        reset_igem_tool_merge_rows()
+        text = _gemini_generate_custom_with_igem_tools(
+            key,
+            mid,
+            user_message.strip(),
+            system_instruction,
+            temperature,
+            max_out,
+            stop_sequences=stop_sequences,
+            debug_ctx=debug_ctx,
+        ).strip()
+    else:
+        text = _gemini_generate_custom(
+            key,
+            mid,
+            user_message.strip(),
+            system_instruction,
+            temperature,
+            max_out,
+            stop_sequences=stop_sequences,
+            debug_ctx=debug_ctx,
+        ).strip()
     if not text:
         raise RuntimeError("Gemma 4 returned empty text.")
     return text
