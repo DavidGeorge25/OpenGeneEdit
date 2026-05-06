@@ -1,0 +1,84 @@
+%% OpenGeneEdit (DGene) — RAG + Gemini search_igem_registry tool calling
+%% Source: HACKATHON_TECHNICAL.md, server.py, circuit_rag_first.py, inference.py, igem_rag.py
+
+%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'basis', 'padding': 12}}}%%
+
+flowchart TB
+    U[/"User prompt"/]
+    SV["server.py · POST /api/compile"]
+
+    subgraph idx["Knowledge index · igem_rag.py"]
+        JSONL[["igem_dataset.jsonl"]]
+        CH[["Chroma persistent store · sentence-transformers embeddings"]]
+        JSONL -.->|"ensure_indexed"| CH
+    end
+
+    M{"compile_mode()\nlegacy | rag_first | circuit_synth"}
+
+    U --> SV --> M
+
+    subgraph leg["Legacy path"]
+        L1["inference · Gemma DNA + channels"]
+        L2["parse_thought_and_sequence"]
+        L3["apply_rag_substitution\nslot-based Chroma merge · optional NCBI"]
+        L1 --> L2 --> L3
+    end
+
+    M -->|"legacy or API-key fallback"| leg
+
+    subgraph hybrid["circuit_synth default · circuit_pipeline.py"]
+        H0["compile_hybrid_variants*"]
+        H1["build_circuit_candidate:\nextract_circuit_spec → synthesize → verify_plasmid"]
+        H5["optional verified candidate · pipeline circuit_synth"]
+        HV["run_rag_first_variants* for remaining slots"]
+        H0 --> H1 --> H5
+        H0 --> HV
+    end
+
+    M -->|"circuit_synth + API key"| H0
+
+    subgraph rf["RAG-first · circuit_rag_first.py"]
+        R1["extract_intent_json"]
+        R2["_flatten_retrieval_queries"]
+        R3["build_part_menu"]
+        R4["retrieve_parts → Chroma top-k"]
+        R3 --> R4
+        R1 --> R2 --> R3
+        R7["assemble_sequence · JSONL concat only"]
+        R6["parse_ordered_bba"]
+    end
+
+    M -->|"rag_first + API key"| R1
+    HV --> R1
+
+    subgraph tc["Hosted Gemma compiler + tool loop · inference.py"]
+        G0["generate_text_gemma4_custom\nigem_tools=True"]
+        G1["_gemini_generate_custom_with_igem_tools"]
+        G2{"model parts:\nfunctionCall?"}
+        G3["_execute_declared_gemini_tool"]
+        G4["search_igem_registry_for_llm_tool"]
+        G5["functionResponse appended → next generateContent"]
+        G6["final text · reasoning + ORDERED_PART_LIST + circuit_design fence"]
+        G7["_merge_igem_tool_rows_into menu_by_name"]
+        G0 --> G1
+        G1 --> G2
+        G2 -->|"yes"| G3 --> G4
+        G4 -->|"Chroma"| CH
+        G4 -->|"extend/drain merge rows"| G5 --> G1
+        G2 -->|"no"| G6 --> G7
+    end
+
+    R5["run_compiler · menu-constrained prompt"]
+    R3 --> R5 --> G0
+    G7 --> R6 --> R7
+
+    subgraph down["Everyone converges"]
+        P["passes.py"]
+        R["ranker.py · pipeline_tier + Pareto"]
+        OUT["response / snapshots · web or app"]
+    end
+
+    R7 --> P
+    L3 --> P
+    H5 --> P
+    P --> R --> OUT

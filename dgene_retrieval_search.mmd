@@ -1,0 +1,12 @@
+%% DGene · Retrieval: how the first “what parts matter?” search happens
+%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'basis'}}}%%
+
+flowchart TB
+    A[Natural language brief]
+    B["Gemma extracts intent JSON\ncircuit_rag_first.extract_intent_json"]
+    C["Flatten into search phrases\ncircuit_rag_first"]
+    D["Retrieve top-k registry rows per phrase\nigem_rag.retrieve_parts"]
+    E[("Sentence-transformers query →\nChroma similarity over igem_dataset.jsonl")]
+    F["Build numbered parts menu\nconstraints for the planner"]
+    A --> B --> C --> D --> F
+    D <-->|embedding search| E

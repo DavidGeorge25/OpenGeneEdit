@@ -12,6 +12,16 @@
 
 Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `inference.py`) or local **GGUF** via [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python). Hosted Gemma is required for **boolean intent extraction**, **RAG-first intent/menu compilers**, **`/api/fix`**, and optional **`expert_review`**; GGUF applies to **legacy** channel DNA generation when configured (`DGENE_INFERENCE`).
 
+### Architecture diagrams
+
+**Tool calling** — compile path with `search_igem_registry`, declared Gemini tools, Chroma-backed hits, and iterative `functionResponse` rounds until the model returns final reasoning (`ORDERED_PART_LIST`, etc.):
+
+![OpenGeneEdit: Gemini tool-calling loop with iGEM registry tools](dgene_tool_calling.png)
+
+**RAG retrieval** — natural-language brief → intent JSON (`circuit_rag_first.extract_intent_json`) → search phrases → `igem_rag.retrieve_parts` / embedding search over `igem_dataset.jsonl` (sentence-transformers + Chroma) → numbered parts menu for the planner:
+
+![OpenGeneEdit: retrieval and embedding search pipeline](dgene_retrieval_search.png)
+
 ### Compile modes (`DGENE_COMPILE_MODE`)
 
 | Mode | Behaviour |

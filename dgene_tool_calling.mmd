@@ -1,0 +1,16 @@
+%% DGene · Part B: native Gemini tool loop (during menu compile)
+%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'basis'}}}%%
+
+flowchart TB
+    A["run_compiler →\ngenerate_text_gemma4_custom\nigem_tools=True"]
+    B["_gemini_generate_custom_with_igem_tools\nfunctionDeclarations:\nsearch_igem_registry"]
+    C{"Model reply has\nfunctionCall?"}
+    D["_execute_declared_gemini_tool"]
+    E["search_igem_registry_for_llm_tool\nigem_rag · Chroma search"]
+    F["attach functionResponse\nnext API round"]
+    G["Final model text\nreasoning · ORDERED_PART_LIST · tags"]
+    H["_merge_igem_tool_rows_into menu\noptional hits for assembly trace"]
+
+    A --> B --> C
+    C -->|yes| D --> E --> F --> B
+    C -->|no| G --> H

@@ -9,6 +9,33 @@ function cleanSeq(s) {
     .replace(/[^ACGT]/g, "");
 }
 
+/** Canonical DNA string for copy / FASTA / GenBank; keeps ``lastSequence`` in sync when repaired. */
+function dnaSequenceForTools() {
+  const pre = $("seqPre");
+  const c = getCandidate(state.selectedId);
+  let raw = "";
+  if (c != null && c.sequence != null && String(c.sequence).length > 0) {
+    raw = c.sequence;
+  } else if (lastSequence) {
+    raw = lastSequence;
+  } else if (pre && pre.textContent) {
+    raw = pre.textContent;
+  }
+  if (!String(raw).trim()) {
+    const rows = state.candidates || [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row != null && row.sequence != null && String(row.sequence).trim() !== "") {
+        raw = row.sequence;
+        break;
+      }
+    }
+  }
+  const seq = cleanSeq(raw);
+  if (seq) lastSequence = seq;
+  return seq;
+}
+
 function gcPercent(seq) {
   const L = seq.length;
   if (!L) return 0;
@@ -57,11 +84,52 @@ function toGenbank(seq, name = "compiled_sequence") {
 
 function downloadText(filename, text, mime = "text/plain") {
   const blob = new Blob([text], { type: mime });
+  const U = typeof URL !== "undefined" ? URL : typeof webkitURL !== "undefined" ? webkitURL : null;
+  if (!U) {
+    exportDebug("downloadText: no URL / webkitURL API");
+    const hint = $("statusHint");
+    if (hint) hint.textContent = "Download API unavailable in this browser.";
+    return;
+  }
+  const url = U.createObjectURL(blob);
+  exportDebug("downloadText", filename, `${text.length} chars`, url.slice(0, 48) + "…");
+
+  if (typeof navigator !== "undefined" && navigator.msSaveOrOpenBlob) {
+    navigator.msSaveOrOpenBlob(blob, filename);
+    U.revokeObjectURL(url);
+    return;
+  }
+
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  a.href = url;
   a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  a.rel = "noopener";
+  a.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+  document.body.appendChild(a);
+
+  requestAnimationFrame(() => {
+    a.click();
+    setTimeout(() => {
+      if (a.parentNode) document.body.removeChild(a);
+      U.revokeObjectURL(url);
+    }, 400);
+  });
+}
+
+/** Set ``?export_debug=1`` or ``localStorage.DGENE_EXPORT_DEBUG=1`` for export traces. */
+function exportDebugEnabled() {
+  try {
+    return (
+      new URLSearchParams(window.location.search).get("export_debug") === "1" ||
+      (typeof localStorage !== "undefined" && localStorage.getItem("DGENE_EXPORT_DEBUG") === "1")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function exportDebug(...args) {
+  if (exportDebugEnabled()) console.info("[OpenGeneEdit export]", ...args);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -1119,8 +1187,13 @@ function applyCompileResultPayload(data) {
   state.candidates = Array.isArray(data.candidates) ? data.candidates : [];
   if (!state.candidates.length) throw new Error("No candidates in snapshot");
 
-  state.selectedId = data.best_id || state.candidates[0].id;
-  const best = getCandidate(state.selectedId);
+  state.selectedId =
+    data.best_id != null && data.best_id !== "" ? data.best_id : state.candidates[0].id;
+  let best = getCandidate(state.selectedId);
+  if (!best) {
+    best = state.candidates[0];
+    state.selectedId = best.id;
+  }
   if (!best) throw new Error("best candidate missing");
 
   const promptVal = typeof data.prompt === "string" ? data.prompt : "";
@@ -1172,16 +1245,24 @@ function paintLiveCompileWorkspace(data, { partial = false, animatePasses = true
 
   const prevSelected = state.selectedId;
   state.candidates = incoming;
-  const idSet = new Set(state.candidates.map((c) => c.id));
 
-  let chosen = prevSelected && idSet.has(prevSelected) ? prevSelected : null;
-  if (!chosen) {
-    const bid = data.best_id;
-    chosen = bid && idSet.has(bid) ? bid : state.candidates[0].id;
+  function resolveCandId(raw) {
+    if (raw === undefined || raw === null || raw === "") return null;
+    const sid = String(raw);
+    const hit = state.candidates.find((c) => String(c.id) === sid);
+    return hit ? hit.id : null;
   }
+
+  let chosen = resolveCandId(prevSelected);
+  if (!chosen) chosen = resolveCandId(data.best_id);
+  if (!chosen && state.candidates.length) chosen = state.candidates[0].id;
   state.selectedId = chosen;
 
-  const best = getCandidate(state.selectedId);
+  let best = getCandidate(state.selectedId);
+  if (!best && state.candidates.length) {
+    best = state.candidates[0];
+    state.selectedId = best.id;
+  }
   if (!best) return;
 
   const extrasMeta = document.getElementById("extrasMeta");
@@ -1299,7 +1380,9 @@ const passFixState = {
 let lastPartialPassesSig = null;
 
 function getCandidate(id) {
-  return state.candidates.find((c) => c.id === id) || null;
+  if (id === undefined || id === null) return null;
+  const sid = String(id);
+  return state.candidates.find((c) => String(c.id) === sid) || null;
 }
 
 function passMetricFor(passes, passId, key = "metric_raw") {
@@ -2300,6 +2383,8 @@ async function compile() {
   state.snapshotIdForBar = null;
   state.selectedId = null;
   state.candidates = [];
+  lastSequence = "";
+  if ($("seqPre")) $("seqPre").textContent = "";
   lastPartialPassesSig = null;
   passFixState.spinningPassId = null;
   passFixState.lastFix = null;
@@ -2461,49 +2546,101 @@ if (snapshotCopyBtn) {
   });
 }
 
-$("compileBtn").addEventListener("click", compile);
-$("newDesignBtn").addEventListener("click", showLanding);
-$("topnavHome").addEventListener("click", (e) => {
-  if (!$("workspace").hidden) {
+const compileBtnEl = $("compileBtn");
+if (compileBtnEl) compileBtnEl.addEventListener("click", compile);
+
+const newDesignBtnEl = $("newDesignBtn");
+if (newDesignBtnEl) newDesignBtnEl.addEventListener("click", showLanding);
+
+/** Optional nav control (not always present in index.html). Must not throw — a null ref aborts the whole module. */
+const topnavHomeEl = $("topnavHome");
+if (topnavHomeEl) {
+  topnavHomeEl.addEventListener("click", (e) => {
+    if (!$("workspace").hidden) {
+      e.preventDefault();
+      showLanding();
+    }
+  });
+}
+
+const promptEl = $("prompt");
+if (promptEl) {
+  promptEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      compile();
+    }
+  });
+}
+
+function onExportClick(format) {
+  const hint = $("statusHint");
+  const c = getCandidate(state.selectedId);
+  exportDebug("onExportClick", format, {
+    selectedId: state.selectedId,
+    sequenceFieldBp: c && c.sequence != null ? String(c.sequence).length : 0,
+    lastSequenceBp: lastSequence ? lastSequence.length : 0,
+    seqPreBp: $("seqPre") && $("seqPre").textContent ? $("seqPre").textContent.length : 0,
+    candidates: state.candidates ? state.candidates.length : 0,
+  });
+  const seq = dnaSequenceForTools();
+  if (!seq) {
+    exportDebug("onExportClick: empty sequence after dnaSequenceForTools");
+    if (hint) {
+      hint.textContent =
+        "No DNA loaded for export yet. If a compile is still running, wait until at least one variant finishes.";
+    }
+    return;
+  }
+  if (format === "fasta") downloadText("compiled_sequence.fasta", toFasta(seq));
+  else if (format === "genbank") downloadText("compiled_sequence.gb", toGenbank(seq));
+}
+
+/** Delegation: clicks on label text inside buttons still reach `#dlFasta` / `#dlGb`. */
+document.body.addEventListener("click", (e) => {
+  const el = e.target;
+  if (!(el instanceof Element)) return;
+  const fasta = el.closest("#dlFasta");
+  const gb = el.closest("#dlGb");
+  if (fasta) {
     e.preventDefault();
-    showLanding();
+    onExportClick("fasta");
+  } else if (gb) {
+    e.preventDefault();
+    onExportClick("genbank");
   }
 });
 
-$("prompt").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    compile();
-  }
-});
-
-$("dlFasta").addEventListener("click", () => {
-  if (!lastSequence) return;
-  downloadText("compiled_sequence.fasta", toFasta(lastSequence));
-});
-$("dlGb").addEventListener("click", () => {
-  if (!lastSequence) return;
-  downloadText("compiled_sequence.gb", toGenbank(lastSequence));
-});
-$("seqCopyBtn").addEventListener("click", async () => {
-  if (!lastSequence) return;
-  const btn = $("seqCopyBtn");
-  const label = $("seqCopyLabel");
-  try {
-    await navigator.clipboard.writeText(lastSequence);
-    label.textContent = "Copied";
-    btn.classList.add("is-copied");
-    setTimeout(() => {
-      label.textContent = "Copy";
-      btn.classList.remove("is-copied");
-    }, 1500);
-  } catch {
-    label.textContent = "Failed";
-    setTimeout(() => {
-      label.textContent = "Copy";
-    }, 1500);
-  }
-});
+const seqCopyBtnEl = $("seqCopyBtn");
+if (seqCopyBtnEl) {
+  seqCopyBtnEl.addEventListener("click", async () => {
+    const hint = $("statusHint");
+    const seq = dnaSequenceForTools();
+    if (!seq) {
+      if (hint) {
+        hint.textContent =
+          "No DNA loaded to copy yet. If a compile is still running, wait for a finished variant.";
+      }
+      return;
+    }
+    const btn = $("seqCopyBtn");
+    const label = $("seqCopyLabel");
+    try {
+      await navigator.clipboard.writeText(seq);
+      if (label) label.textContent = "Copied";
+      if (btn) btn.classList.add("is-copied");
+      setTimeout(() => {
+        if (label) label.textContent = "Copy";
+        if (btn) btn.classList.remove("is-copied");
+      }, 1500);
+    } catch {
+      if (label) label.textContent = "Failed";
+      setTimeout(() => {
+        if (label) label.textContent = "Copy";
+      }, 1500);
+    }
+  });
+}
 
 const plasmidSvgEl = $("plasmidSvg");
 const plasmidViewport = $("viewport");

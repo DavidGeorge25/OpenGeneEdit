@@ -26,7 +26,16 @@ Malformed model output fails the request (**no skipping** failed candidates).
 variables are not overwritten).
 
 Set ``DGENE_GEMINI_DEBUG=1`` for Gemini HTTP / retry stderr traces (``[oge/infer]``).
-``DGENE_DEBUG=1`` does not enable those lines (use it with RAG: see ``igem_rag`` / ``DGENE_RAG_DEBUG``).
+
+``DGENE_DEBUG=1`` does not enable those ``[oge/infer]`` lines, but it **does** mirror
+``compile_progress`` lines to stderr as ``[oge/progress]`` (same high-level steps as the UI job
+log) and dumps a **truncated final model reply** after the RAG-first tool loop (non-streaming).
+
+Pair with **``DGENE_LOG_REASONING_ONLY=1``** (in ``igem_rag``) to hide **``[oge/rag]``** stderr
+noise while keeping **``[oge/progress]``** / **``[oge/gemma]``**.
+
+Set ``DGENE_COMPILE_PROGRESS_STDERR=1`` to mirror only progress lines without ``DGENE_DEBUG``.
+
 Restart the server after changing ``.env``.
 """
 from __future__ import annotations
@@ -62,8 +71,46 @@ def set_compile_progress_hook(cb: Optional[Callable[[str], None]]) -> None:
         _COMPILE_PROGRESS_CB = cb
 
 
+def _compile_progress_stderr_mirror() -> bool:
+    for name in ("DGENE_COMPILE_PROGRESS_STDERR", "DGENE_DEBUG"):
+        v = (os.environ.get(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
+def _emit_compile_progress_stderr(msg: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    sys.stderr.write(f"[oge/progress {ts}] {msg}\n")
+    sys.stderr.flush()
+
+
+def _stderr_gemma_reply_preview(debug_ctx: str, text: str) -> None:
+    """Long-form model text (e.g. `<reasoning>`) — not emitted for ``DGENE_COMPILE_PROGRESS_STDERR`` alone."""
+
+    gemini_dbg = infer_debug_enabled()
+    general_dbg = (os.environ.get("DGENE_DEBUG") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not gemini_dbg and not general_dbg:
+        return
+    body = (text or "").strip()
+    cap = 2400
+    if len(body) > cap:
+        body = body[:cap] + "\n…(truncated for stderr; full string in API `rag.compiler_raw`)"
+    ts = time.strftime("%H:%M:%S")
+    label = (debug_ctx or "gemma").strip()
+    sys.stderr.write(f"[oge/gemma {ts}] {label} · model reply ({len(text or '')} chars):\n{body}\n")
+    sys.stderr.flush()
+
+
 def compile_progress(msg: str) -> None:
-    """Emit one progress line if a hook is installed (no-op otherwise)."""
+    """Emit one progress line via the active hook and optionally mirror to stderr."""
+    if _compile_progress_stderr_mirror():
+        _emit_compile_progress_stderr(msg)
     with _HOOK_LOCK:
         fn = _COMPILE_PROGRESS_CB
     if not fn:
@@ -1315,6 +1362,7 @@ def generate_text_gemma4_custom(
         ).strip()
     if not text:
         raise RuntimeError("Gemma 4 returned empty text.")
+    _stderr_gemma_reply_preview(debug_ctx, text)
     return text
 
 

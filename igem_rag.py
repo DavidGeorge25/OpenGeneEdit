@@ -19,9 +19,15 @@ Environment:
     ``NCBI_API_KEY`` or ``DGENE_NCBI_API_KEY`` for 10 req/s (free at NCBI). ``DGENE_NCBI=0``
     disables. See ``.env.example``.
 
-Logging (stderr): Every compile prints chroma query strings, ``ALIAS HIT:`` lines for the
-alias table, per-slot hits (part_name, sim, bp), and sequence length before/after RAG.
-Set ``DGENE_RAG_DEBUG=1`` or ``DGENE_DEBUG=1`` for extra retrieval hit lists.
+Logging (stderr): By default every compile prints chroma query strings, alias hits,
+per-slot retrieval lines, etc. (**``[oge/rag]``**). Set **``DGENE_LOG_REASONING_ONLY=1``**
+to suppress those stderr lines while still running RAG — use with **``DGENE_DEBUG=1``**
+(or **``DGENE_COMPILE_PROGRESS_STDERR=1``**) in ``inference`` to print **``[oge/progress]``**
+and **``[oge/gemma]``** reasoning instead. Alternatively set **``DGENE_RAG_STDERR=0``**
+without reasoning-only mode. **``DGENE_RAG_PROGRESS_MIRROR=1``** forces RAG lines into the
+async job / UI trace even when **``DGENE_LOG_REASONING_ONLY=1``** (stderr stays clean).
+Legacy channel compile still prints parsed thought under **``[oge/thought]``**.
+Extra hit lists when RAG stderr is on: **``DGENE_RAG_DEBUG=1``** or **``DGENE_DEBUG=1``**.
 
 Alias table (subset): ``luxR``→BBa_C0062, ``luxI``→BBa_C0061, ``plux``→BBa_R0062,
 ``mcherry``→BBa_E1010, ``j23100``→BBa_K4233030 (dataset snapshot has no BBa_J23100),
@@ -126,11 +132,33 @@ def rag_debug_enabled() -> bool:
     return _rag_env_bool("DGENE_RAG_DEBUG", False) or _rag_env_bool("DGENE_DEBUG", False)
 
 
+def _rag_stderr_enabled() -> bool:
+    """``[oge/rag]`` on stderr unless silenced."""
+
+    if _rag_env_bool("DGENE_LOG_REASONING_ONLY", False):
+        return False
+    v = (os.environ.get("DGENE_RAG_STDERR") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _rag_mirror_enabled() -> bool:
+    """Copy RAG lines into async compile-job progress (``[rag]`` in UI). Disabled in reasoning-only."""
+
+    o = (os.environ.get("DGENE_RAG_PROGRESS_MIRROR") or "").strip().lower()
+    if o in ("1", "true", "yes", "on"):
+        return True
+    if o in ("0", "false", "no", "off"):
+        return False
+    if _rag_env_bool("DGENE_LOG_REASONING_ONLY", False):
+        return False
+    return True
+
+
 _RAG_DEBUG_MIRROR: Any = None
 
 
 def set_rag_debug_mirror(cb: Optional[Any]) -> None:
-    """Optional callback (e.g. async compile job line) — same text as :func:`rag_debug_log` when debug is on."""
+    """Optional callback (e.g. async compile job line) — mirrors :func:`rag_debug_log` / :func:`rag_always_log` when enabled."""
 
     global _RAG_DEBUG_MIRROR
     _RAG_DEBUG_MIRROR = cb
@@ -140,9 +168,10 @@ def rag_debug_log(line: str) -> None:
     if not rag_debug_enabled():
         return
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[oge/rag {ts}] {line}\n")
-    sys.stderr.flush()
-    if _RAG_DEBUG_MIRROR is not None:
+    if _rag_stderr_enabled():
+        sys.stderr.write(f"[oge/rag {ts}] {line}\n")
+        sys.stderr.flush()
+    if _RAG_DEBUG_MIRROR is not None and _rag_mirror_enabled():
         try:
             _RAG_DEBUG_MIRROR(line)
         except Exception:
@@ -157,13 +186,24 @@ def rag_always_log(line: str) -> None:
     skipped.
     """
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[oge/rag {ts}] {line}\n")
-    sys.stderr.flush()
-    if _RAG_DEBUG_MIRROR is not None:
+    if _rag_stderr_enabled():
+        sys.stderr.write(f"[oge/rag {ts}] {line}\n")
+        sys.stderr.flush()
+    if _RAG_DEBUG_MIRROR is not None and _rag_mirror_enabled():
         try:
             _RAG_DEBUG_MIRROR(line)
         except Exception:
             pass
+
+
+def reasoning_trace_log(line: str) -> None:
+    """Legacy path: dump parsed model thought chunk to stderr (**``[oge/thought]``**).
+
+    Not filtered by reasoning-only mode (unlike ``[oge/rag]``) so trimming RAG stderr
+    still shows channel-thought prose during ``apply_rag_substitution``."""
+    ts = time.strftime("%H:%M:%S")
+    sys.stderr.write(f"[oge/thought {ts}] {line}\n")
+    sys.stderr.flush()
 
 
 def _lazy_clients():
@@ -1339,14 +1379,14 @@ def apply_rag_substitution(
     if th_prev:
         cap = 4000
         if len(th_prev) > cap:
-            rag_always_log(
+            reasoning_trace_log(
                 f"{ctx}: MODEL REASONING ({len(th_prev)} chars, first {cap} shown):\n"
                 f"{th_prev[:cap]}\n… [truncated]"
             )
         else:
-            rag_always_log(f"{ctx}: MODEL REASONING ({len(th_prev)} chars):\n{th_prev}")
+            reasoning_trace_log(f"{ctx}: MODEL REASONING ({len(th_prev)} chars):\n{th_prev}")
     else:
-        rag_always_log(f"{ctx}: MODEL REASONING: (empty)")
+        reasoning_trace_log(f"{ctx}: MODEL REASONING: (empty)")
     for qi, (type_hint, query_text) in enumerate(queries):
         rag_always_log(
             f"{ctx}:   extracted[{qi}] type_hint={type_hint!r} query={query_text!r}"

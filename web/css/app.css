@@ -1082,6 +1082,8 @@ body.in-workspace .plasmid-svg {
   padding: 0.6rem 1.05rem;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
+  position: relative;
+  z-index: 3;
 }
 
 .artifact-heading {
