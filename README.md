@@ -1,5 +1,43 @@
 # OpenGeneEdit
 
+## Quick start: fine-tuned model only (no Gemini API)
+
+Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps:
+
+1. **Download the weights**  
+   Open **[davidgeorge25/opengenedit-gemma-4-31b](https://huggingface.co/davidgeorge25/opengenedit-gemma-4-31b)** → **Files and versions** → download **`dgene-q4km.gguf`** (Q4_K_M, based on `google/gemma-4-31B-it`).
+
+2. **Install Python deps** (repo root)
+
+   ```bash
+   python3 -m pip install -r requirements.txt
+   python3 -m pip install llama-cpp-python
+   ```
+
+3. **Create `.env`** next to `server.py` with:
+
+   ```bash
+   DGENE_GGUF_PATH=/absolute/path/to/dgene-q4km.gguf
+   DGENE_INFERENCE=gguf
+   DGENE_COMPILE_MODE=legacy
+   ```
+
+   - **`DGENE_INFERENCE=gguf`** forces local inference even if a Gemini/Google API key is set elsewhere on your machine.  
+   - **`DGENE_COMPILE_MODE=legacy`** runs the path where **your GGUF** generates `<|channel>thought` + DNA + `</circuit>`, then iGEM RAG can substitute slots (`apply_rag_substitution`).  
+     Topology/RAG-first modes need the **hosted** API; without it they fall back to legacy anyway — setting **`legacy`** avoids extra warnings.
+
+4. **Start the compiler UI**
+
+   ```bash
+   python3 server.py
+   ```
+
+   Open the printed URL (often **`http://127.0.0.1:8765/`**).
+
+**Hardware.** A **31B** quantized model is large; on CPU-only boxes expect slow generations. If `llama-cpp-python` is built with CUDA or Metal, you can offload layers via **`DGENE_GGUF_GPU_LAYERS`** (see **[`.env.example`](.env.example)**).
+
+---
+
 **OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler”: you describe a genetic circuit in natural language and get structured reasoning, candidate sequences, iGEM-aware retrieval and audits, heuristic compiler passes, multi-objective ranking (including a Pareto-style front), plasmid visualization, and FASTA / GenBank export.
 
 **Full technical reference (architecture, RAG, APIs, env vars, limitations):** [`HACKATHON_TECHNICAL.md`](HACKATHON_TECHNICAL.md)
