@@ -233,4 +233,4 @@ Gitignored / runtime: `.chroma_igem/`, `.design_snapshots/`, caches.
 
 **Live demo:** *(paste deployment URL here.)*
 
-**Fine-tuned GGUF:** **[davidgeorge25/opengenedit-gemma-4-31b](https://huggingface.co/davidgeorge25/opengenedit-gemma-4-31b)** — download **`dgene-q4km.gguf`** (Q4_K_M); base **`google/gemma-4-31B-it`**. Set **`DGENE_GGUF_PATH`** to the downloaded file; **`DGENE_INFERENCE=gguf`** to bypass hosted API when both keys and GGUF exist. See **README → Quick start: fine-tuned model only**.
+**Fine-tuned GGUF:** **[davidgeorge25/opengenedit-gemma-4-31b](https://huggingface.co/davidgeorge25/opengenedit-gemma-4-31b)** — download **`dgene-q4km.gguf`** (Q4_K_M); base **`google/gemma-4-31B-it`**. Set **`DGENE_GGUF_PATH`** to the downloaded file; **`DGENE_INFERENCE=gguf`** to bypass hosted API when both keys and GGUF exist. The same file runs under standalone **`llama-server -m …`** / **`-hf davidgeorge25/opengenedit-gemma-4-31b`** (recent llama.cpp; Gemma 4 support). OpenGeneEdit loads it via **`llama-cpp-python`** in-process — see **README → Quick start**.

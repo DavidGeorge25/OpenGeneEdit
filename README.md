@@ -36,6 +36,23 @@ Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps
 
 **Hardware.** A **31B** quantized model is large; on CPU-only boxes expect slow generations. If `llama-cpp-python` is built with CUDA or Metal, you can offload layers via **`DGENE_GGUF_GPU_LAYERS`** (see **[`.env.example`](.env.example)**).
 
+### Same GGUF with upstream llama.cpp (`llama-server` / `llama-cli`)
+
+The file **`dgene-q4km.gguf`** you downloaded is a standard **GGUF** — it is the same artifact **[llama.cpp](https://github.com/ggerganov/llama.cpp)** loads. You can host it locally **without Python**:
+
+```bash
+# Install llama.cpp (pick one): brew, winget, or a release binary from the llama.cpp repo
+# Then, using your downloaded file:
+llama-server -m /absolute/path/to/dgene-q4km.gguf
+
+# Or let llama.cpp fetch from Hugging Face (same repo / weights as above):
+llama-server -hf davidgeorge25/opengenedit-gemma-4-31b
+```
+
+Use a **recent** llama.cpp build so **Gemma 4** is supported. The terminal prints a **local URL** (often with a small web UI and an OpenAI-compatible HTTP API) for chatting or testing the fine-tune outside OpenGeneEdit.
+
+**OpenGeneEdit compiler:** `python3 server.py` uses **`llama-cpp-python`** (llama.cpp under the hood) with **`DGENE_GGUF_PATH`** — it loads that **same `.gguf` in-process**. It does **not** call `llama-server` today; use **`DGENE_GGUF_PATH` + `DGENE_INFERENCE=gguf`** for compiles in the web UI, and use **`llama-server`** separately if you want a standalone local host for the identical weights.
+
 ---
 
 **OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler”: you describe a genetic circuit in natural language and get structured reasoning, candidate sequences, iGEM-aware retrieval and audits, heuristic compiler passes, multi-objective ranking (including a Pareto-style front), plasmid visualization, and FASTA / GenBank export.
