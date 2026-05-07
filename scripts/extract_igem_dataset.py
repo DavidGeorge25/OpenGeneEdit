@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
+"""Build ``data/igem_dataset.jsonl`` from iGEM ``xml_parts.xml.gz`` (run from any cwd)."""
+
 import gzip
 import html
 import json
 import re
 from pathlib import Path
 
-
-INPUT_PATH = Path("xml_parts.xml.gz")
-OUTPUT_PATH = Path("igem_dataset.jsonl")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+INPUT_PATH = _REPO_ROOT / "data" / "xml_parts.xml.gz"
+OUTPUT_PATH = _REPO_ROOT / "data" / "igem_dataset.jsonl"
 
 
 TABLE_START_RE = re.compile(r'<table_data name="([^"]+)">')

@@ -12,7 +12,7 @@
 
 | Backend | Env | Role |
 |--------|-----|------|
-| Hosted | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `DGENE_GOOGLE_API_KEY`, `DGENE_GEMINI_MODEL` | Default when keys exist (`DGENE_INFERENCE=auto`). Used for **circuit intent**, **RAG-first intent/menu/compiler**, **`search_igem_registry`** tool loop, **`/api/fix`**, **`expert_review`**, **`generate_gemma_train.py`**. |
+| Hosted | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `DGENE_GOOGLE_API_KEY`, `DGENE_GEMINI_MODEL` | Default when keys exist (`DGENE_INFERENCE=auto`). Used for **circuit intent**, **RAG-first intent/menu/compiler**, **`search_igem_registry`** tool loop, **`/api/fix`**, **`expert_review`**, **`scripts/generate_gemma_train.py`**. |
 | Local GGUF | `DGENE_GGUF_PATH`, optional `DGENE_GGUF_CTX`, `DGENE_GGUF_GPU_LAYERS`, `DGENE_GGUF_MAX_TOKENS` | **`GGUFBackend`** — sampling with channel-tagged prompts; typical use: **`DGENE_COMPILE_MODE=legacy`** or forcing **`DGENE_INFERENCE=gguf`** when keys are absent. |
 
 **Important:** `circuit_synth` and `rag_first` require **`rag_first_configured()`** (hosted API key). If the mode is `circuit_synth` or `rag_first` but no key is set, **`server.py`** falls back to **legacy** `backend.generate` + post-hoc RAG (**stderr warning**). **`circuit_pipeline.compile_hybrid_variants_iter`** raises if there is **no** topology candidate **and** no API key for RAG-first.
@@ -28,7 +28,7 @@ Condensed from official track copy:
 | **Health & Sciences** | $10,000 | *Bridge the gap between humans and data; accelerate discovery / democratize knowledge.* Aligns with NL→structured designs, registry RAG, audits, topology verification, exports. |
 | **llama.cpp** | $10,000 | *Best innovative Gemma 4 on **resource-constrained hardware**.* Story: quantized **GGUF** + **`llama-cpp-python`**, CPU/partial GPU (`DGENE_GGUF_GPU_LAYERS`). |
 | **Ollama** | $10,000 | *Gemma 4 **locally via Ollama**.* This repo’s default local stack is **`llama-cpp-python`**, not Ollama; align judging narrative with a documented Ollama workflow or integration if targeting this prize. |
-| **Unsloth** | $10,000 | *Best **Unsloth** fine-tune of Gemma 4 for an impactful task.* **`gemma_train.jsonl`** from **`generate_gemma_train.py`** feeds external Unsloth SFT/LoRA → merge → GGUF. |
+| **Unsloth** | $10,000 | *Best **Unsloth** fine-tune of Gemma 4 for an impactful task.* **`data/gemma_train.jsonl`** from **`scripts/generate_gemma_train.py`** feeds external Unsloth SFT/LoRA → merge → GGUF. |
 
 ---
 
@@ -65,7 +65,7 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 | `circuit_ir.py` | **`CircuitSpec`**, **`LogicSpec`**, **`truth_table()`**. |
 | `circuit_intent.py` | Hosted Gemma → strict JSON → **`CircuitSpec`** or skip. |
 | `circuit_parts.py` | Curated promoters/TFs/backbone for **`circuit_synth`**. |
-| `circuit_synth.py` | Deterministic assembly from catalog / **`igem_dataset.jsonl`**. |
+| `circuit_synth.py` | Deterministic assembly from catalog / **`data/igem_dataset.jsonl`**. |
 | `circuit_verify.py` | Regulatory graph vs truth table. |
 | `circuit_pipeline.py` | **`build_circuit_candidate`**, **`compile_hybrid_variants`** / **`_iter`**. |
 | `circuit_rag_first.py` | **`extract_intent_json`**, **`build_part_menu`**, **`run_compiler`** (tools on), **`parse_ordered_bba`**, **`assemble_sequence`**, variant iterators + temps. |
@@ -76,8 +76,8 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 | `ranker.py` | Objectives, **`WEIGHTS`**, Pareto, **`pipeline_tier`**, **`prompt_alignment`**. |
 | `server.py` | **`ThreadingHTTPServer`**; static **`web/`**; **`/api/compile`**, **`/api/compile/status`**, **`/api/fix`**, **`/api/snapshot`**, **`/api/health`**. |
 | `app.py` | Streamlit: legacy **`run_inference`** + RAG + Bokeh map only. |
-| `extract_igem_dataset.py` | `xml_parts.xml.gz` → **`igem_dataset.jsonl`** (filtered types, ACGT, length ≥ 40). |
-| `generate_gemma_train.py` | Balanced sample → hosted Gemma reasoning → **`gemma_train.jsonl`** (channel-tagged assistant targets). |
+| `scripts/extract_igem_dataset.py` | `data/xml_parts.xml.gz` → **`data/igem_dataset.jsonl`** (filtered types, ACGT, length ≥ 40). |
+| `scripts/generate_gemma_train.py` | Balanced sample → hosted Gemma reasoning → **`data/gemma_train.jsonl`** (channel-tagged assistant targets). |
 
 ---
 
@@ -85,14 +85,14 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 
 **Registry corpus**
 
-- Input: **`xml_parts.xml.gz`** (iGEM parts table XML).
-- **`extract_igem_dataset.py`**: tolerant gzip stream; rows → **`Promoter` / `RBS` / `CDS` / `Terminator`**; sequence hygiene (**≥40 bp**, no **`N`**, **[ACGT]** only).
+- Input: **`data/xml_parts.xml.gz`** (iGEM parts table XML).
+- **`scripts/extract_igem_dataset.py`**: tolerant gzip stream; rows → **`Promoter` / `RBS` / `CDS` / `Terminator`**; sequence hygiene (**≥40 bp**, no **`N`**, **[ACGT]** only).
 - Output lines: `part_id`, `part_name`, `part_type`, `short_desc`, `sequence`.
 
 **Fine-tune helper**
 
-- **`generate_gemma_train.py`**: **`--sample-size`** divisible by 4; per-row **`generate_text_gemma4`** (PhD-style 2-sentence rationale); assistant format matches **`parse_thought_and_sequence`** (`<|channel>thought` … `<channel|>` … sequence).
-- Repo stops at **`gemma_train.jsonl`**; training merge and **GGUF** export are **out-of-repo** (llama.cpp converters, Unsloth, etc.).
+- **`scripts/generate_gemma_train.py`**: **`--sample-size`** divisible by 4; per-row **`generate_text_gemma4`** (PhD-style 2-sentence rationale); assistant format matches **`parse_thought_and_sequence`** (`<|channel>thought` … `<channel|>` … sequence).
+- Repo stops at **`data/gemma_train.jsonl`**; training merge and **GGUF** export are **out-of-repo** (llama.cpp converters, Unsloth, etc.).
 
 ---
 
@@ -104,14 +104,14 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 2. **RAG-first menu** — **`build_part_menu`**: embed queries from **`intent`** (+flattened **`retrieval_queries`**); top‑**k** per query (**`DGENE_RAG_FIRST_TOP_K`**); dedupe → numbered menu.
 3. **Mid-compile tools** — **`run_compiler`** calls **`generate_text_gemma4_custom(..., igem_tools=True)`** (unless **`DGENE_GEMINI_IGEM_TOOLS=0`**): Gemini **`functionCall`** → **`search_igem_registry`** → **`functionResponse`** (cap **`DGENE_GEMINI_TOOL_ROUNDS`**). Extra rows merge into **`menu_by_name`** for **`assemble_sequence`**.
 
-**Chroma:** persistence **`DGENE_CHROMA_PATH`** (default `.chroma_igem`); corpus path **`DGENE_IGEM_JSONL`**. Registry token cache / NCBI cache may live under the same tree.
+**Chroma:** persistence **`DGENE_CHROMA_PATH`** (default `.chroma_igem`); corpus path **`DGENE_IGEM_JSONL`** (default repo-relative **`data/igem_dataset.jsonl`**). Registry token cache / NCBI cache may live under the same tree.
 
 ---
 
 ## 8. Topology compiler (`circuit_synth`)
 
 - **`extract_circuit_spec`** → **`CircuitSpec`** with **`LOGIC_OPS`** = BUF, NOT, AND, OR, NAND, NOR over catalog-backed inputs/reporters.
-- **`synthesize`** builds **`Plasmid`** from **`circuit_parts`** + **`igem_dataset.jsonl`**.
+- **`synthesize`** builds **`Plasmid`** from **`circuit_parts`** + **`data/igem_dataset.jsonl`**.
 - **`verify_plasmid`** compares simulated outputs to **`truth_table()`**; failure ⇒ **no** topology candidate.
 - **`rag` payload:** `verification.truth_table`, `backbone`, `circuit_spec`, **`pipeline`: `"circuit_synth"`**.
 
@@ -220,9 +220,9 @@ Static assets: **`/`** → `web/index.html`; same-origin **`/api/*`**.
 | `design_expert_lint.py`, `expert_review.py` | QA passes |
 | `passes.py`, `ranker.py` | Metrics + ordering |
 | `app.py` | Streamlit legacy demo |
-| `igem_dataset.jsonl` | Parts corpus |
-| `gemma_train.jsonl` | Generated training data (optional artifact) |
-| `extract_igem_dataset.py`, `generate_gemma_train.py` | Dataset builders |
+| `data/igem_dataset.jsonl` | Parts corpus |
+| `data/gemma_train.jsonl` | Generated training data (optional artifact) |
+| `scripts/extract_igem_dataset.py`, `scripts/generate_gemma_train.py` | Dataset builders |
 | `Procfile`, `railway.toml`, `nixpacks.toml`, `runtime.txt` | Deploy hints (Railway: **`python server.py`**, health **`GET /api/health`**, RAM **≥ ~2 GB** for first embed). |
 
 Gitignored / runtime: `.chroma_igem/`, `.design_snapshots/`, caches.

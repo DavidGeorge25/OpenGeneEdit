@@ -8,7 +8,12 @@ import re
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from inference import generate_text_gemma4
 
@@ -28,8 +33,16 @@ def parse_args():
             "(GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL)."
         )
     )
-    parser.add_argument("--input", default="igem_dataset.jsonl", help="Input JSONL path.")
-    parser.add_argument("--output", default="gemma_train.jsonl", help="Output JSONL path.")
+    parser.add_argument(
+        "--input",
+        default=str(_REPO_ROOT / "data" / "igem_dataset.jsonl"),
+        help="Input JSONL path.",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(_REPO_ROOT / "data" / "gemma_train.jsonl"),
+        help="Output JSONL path.",
+    )
     parser.add_argument(
         "--sample-size",
         type=int,

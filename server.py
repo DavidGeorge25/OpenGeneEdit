@@ -8,7 +8,7 @@ Pipeline per /api/compile request (default ``DGENE_COMPILE_MODE=circuit_synth``)
   slots use RAG-first. Post-hoc slot RAG substitution is skipped for verified circuit rows.
 
   **RAG-first:** extract biological intent (Gemma) → Chroma retrieval from
-  ``igem_dataset.jsonl`` (top-k per query) → optional deterministic **slot template** cassette
+  ``data/igem_dataset.jsonl`` (top-k per query) → optional deterministic **slot template** cassette
   (``slot_template_compile.py``: AND/OR/BUF promoter+RBS+CDS+terminator from per-type retrieval when
   the intent JSON parses ``gate`` / ``input_analytes``) → remaining slots use menu-constrained compiler (Gemma) → concatenate
   registry DNA only (``circuit_rag_first.py``). Post-hoc RAG substitution is skipped.
@@ -16,7 +16,7 @@ Pipeline per /api/compile request (default ``DGENE_COMPILE_MODE=circuit_synth``)
   **Legacy** (``DGENE_COMPILE_MODE=legacy``):
 
   1. inference backend → N candidate (thought, sequence) pairs
-  2. iGEM RAG          → optional substitution from ``igem_dataset.jsonl`` via ChromaDB
+  2. iGEM RAG          → optional substitution from ``data/igem_dataset.jsonl`` via ChromaDB
                          (see ``igem_rag.py``); candidates gain a ``rag`` field
   3. compiler passes   → per-candidate diagnostics + score-bearing metrics
   4. ranker            → composite score + Pareto front

@@ -30,7 +30,7 @@ from circuit_ir import BackboneRef, PartRef
 
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "igem_dataset.jsonl")
+_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "data", "igem_dataset.jsonl")
 
 _JSONL_LOCK = threading.Lock()
 _JSONL_INDEX: Optional[Dict[str, dict]] = None

@@ -1,11 +1,11 @@
 """iGEM parts RAG: JSONL → ChromaDB + sentence-transformers retrieval.
 
-Dataset: ``igem_dataset.jsonl`` in the project root (``part_id``, ``part_name``,
+Dataset: ``data/igem_dataset.jsonl`` under the repo root (``part_id``, ``part_name``,
 ``part_type``, ``short_desc``, ``sequence``).
 
 Environment:
 
-  • ``DGENE_IGEM_JSONL`` — override path to JSONL (default: beside this package).
+  • ``DGENE_IGEM_JSONL`` — override path to JSONL (default: ``data/igem_dataset.jsonl``).
   • ``DGENE_CHROMA_PATH`` — persistent Chroma directory (default: ``.chroma_igem``).
   • ``DGENE_RAG`` — set ``0`` / ``false`` to disable substitution in the compile pipeline.
   • ``DGENE_RAG_MIN_SIM`` — minimum cosine similarity to **substitute** registry DNA for a
@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ncbi_gene import fetch_gene_cds, gene_symbol_eligible_for_ncbi
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "igem_dataset.jsonl")
+_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "data", "igem_dataset.jsonl")
 _DEFAULT_CHROMA = os.path.join(_MODULE_DIR, ".chroma_igem")
 _EMBED_MODEL = "all-MiniLM-L6-v2"
 _COLLECTION = "igem_parts"

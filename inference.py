@@ -1569,7 +1569,7 @@ class GGUFBackend:
         )
 
     def _format_prompt(self, user_prompt: str) -> str:
-        # Mirrors the training format in gemma_train.jsonl: instruction + thought channel.
+        # Mirrors the training format in data/gemma_train.jsonl: instruction + thought channel.
         return (
             "<|user|>\n"
             f"{user_prompt}\n"

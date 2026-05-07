@@ -1,5 +1,22 @@
 # OpenGeneEdit
 
+## Gemma 4 implementation (for reviewers)
+
+Trace **hosted Gemma 4** and **optional local GGUF** in **[`inference.py`](inference.py)**:
+
+| Entry point | Role |
+|-------------|------|
+| **`generate_text_gemma4`** / **`generate_text_gemma4_custom`** | Google Generative Language API (`DGENE_GEMINI_MODEL`, default **`gemma-4-31b-it`**); retries, streaming, tool payloads. |
+| **`_gemini_generate_custom_with_igem_tools`** | Multi-turn **`functionCall`** / **`functionResponse`** loop with **`search_igem_registry`** during compile. |
+| **`get_backend`** → **`run_inference`** | Resolves **`DGENE_INFERENCE`** (`auto` chooses Gemini vs **`llama-cpp-python`** when **`DGENE_GGUF_PATH`** is set). |
+| **`parse_thought_and_sequence`** | Parses channel-tagged model output (`<|channel>thought` … `</circuit>`) used in legacy and training formats. |
+
+Supervised JSONL for external SFT / LoRA → GGUF: **[`scripts/generate_gemma_train.py`](scripts/generate_gemma_train.py)** (same **`generate_text_gemma4`** API path as the live compiler).
+
+**Architecture & APIs:** [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+---
+
 ## Quick start: fine-tuned model only (no Gemini API)
 
 Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps:
@@ -57,7 +74,7 @@ Use a **recent** llama.cpp build so **Gemma 4** is supported. The terminal print
 
 **OpenGeneEdit** is a synthetic-biology–oriented DNA “compiler”: you describe a genetic circuit in natural language and get structured reasoning, candidate sequences, iGEM-aware retrieval and audits, heuristic compiler passes, multi-objective ranking (including a Pareto-style front), plasmid visualization, and FASTA / GenBank export.
 
-**Full technical reference (architecture, RAG, APIs, env vars, limitations):** [`HACKATHON_TECHNICAL.md`](HACKATHON_TECHNICAL.md)
+**Full technical reference (architecture, RAG, APIs, env vars, limitations):** [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md)
 
 **Naming.** Product branding is **OpenGeneEdit**. Stderr tags use **`oge`** (e.g. `[oge/server]`). Configuration keys keep the **`DGENE_*`** prefix so existing `.env` files stay valid.
 
@@ -71,11 +88,11 @@ Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `infere
 
 **Tool calling** — compile path with `search_igem_registry`, declared Gemini tools, Chroma-backed hits, and iterative `functionResponse` rounds until the model returns final reasoning (`ORDERED_PART_LIST`, etc.):
 
-![OpenGeneEdit: Gemini tool-calling loop with iGEM registry tools](dgene_tool_calling.png)
+![OpenGeneEdit: Gemini tool-calling loop with iGEM registry tools](docs/diagrams/dgene_tool_calling.png)
 
-**RAG retrieval** — natural-language brief → intent JSON (`circuit_rag_first.extract_intent_json`) → search phrases → `igem_rag.retrieve_parts` / embedding search over `igem_dataset.jsonl` (sentence-transformers + Chroma) → numbered parts menu for the planner:
+**RAG retrieval** — natural-language brief → intent JSON (`circuit_rag_first.extract_intent_json`) → search phrases → `igem_rag.retrieve_parts` / embedding search over **`data/igem_dataset.jsonl`** (sentence-transformers + Chroma) → numbered parts menu for the planner:
 
-![OpenGeneEdit: retrieval and embedding search pipeline](dgene_retrieval_search.png)
+![OpenGeneEdit: retrieval and embedding search pipeline](docs/diagrams/dgene_retrieval_search.png)
 
 ### Compile modes (`DGENE_COMPILE_MODE`)
 
@@ -89,7 +106,7 @@ If **`circuit_synth`** or **`rag_first`** is selected but **no** `GEMINI_API_KEY
 
 ### iGEM data & RAG
 
-- **Corpus:** `igem_dataset.jsonl` (from [`extract_igem_dataset.py`](extract_igem_dataset.py) + optional `xml_parts.xml.gz`).
+- **Corpus:** [`data/igem_dataset.jsonl`](data/igem_dataset.jsonl) (from [`scripts/extract_igem_dataset.py`](scripts/extract_igem_dataset.py) + optional [`data/xml_parts.xml.gz`](data/xml_parts.xml.gz)).
 - **Embeddings:** ChromaDB + **`sentence-transformers`** (`all-MiniLM-L6-v2`), persisted under **`DGENE_CHROMA_PATH`** (default `.chroma_igem`).
 - **Two retrieval paths:** (1) **Legacy post-hoc** **`apply_rag_substitution`** — proportional chunks + similarity (**promoters** use **`DGENE_RAG_MIN_SIM_PROMOTER`** vs **`DGENE_RAG_MIN_SIM`**). (2) **RAG-first** — retrieve **before** the compiler; DNA from menu/`ORDERED_PART_LIST` only (details in §5–5.10 of the technical doc).
 - **NCBI fallback:** **`ncbi_gene.py`** (Entrez) for CDS-shaped symbols when iGEM does not verify; promoter slots default **`DGENE_NCBI_PROMOTER_SLOTS=0`**.
@@ -114,7 +131,12 @@ If **`circuit_synth`** or **`rag_first`** is selected but **no** `GEMINI_API_KEY
 
 ### Fine-tuning helper
 
-[`generate_gemma_train.py`](generate_gemma_train.py) builds **`gemma_train.jsonl`** from `igem_dataset.jsonl` for external SFT/LoRA → GGUF workflows (see technical doc §3).
+[`scripts/generate_gemma_train.py`](scripts/generate_gemma_train.py) builds **[`data/gemma_train.jsonl`](data/gemma_train.jsonl)** from **`data/igem_dataset.jsonl`** for external SFT/LoRA → GGUF workflows (see technical doc §3).
+
+```bash
+python3 scripts/extract_igem_dataset.py   # data/xml_parts.xml.gz → data/igem_dataset.jsonl
+python3 scripts/generate_gemma_train.py    # hosted Gemma 4 → data/gemma_train.jsonl (needs API key)
+```
 
 ---
 
@@ -143,7 +165,7 @@ python3 -m pip install streamlit bokeh pandas dna-features-viewer
 
 ## Configuration
 
-Create **`.env`** at the repo root (optional; loaded in `inference.py`, **does not override** existing environment variables). See **[`.env.example`](.env.example)** and **§10 of [`HACKATHON_TECHNICAL.md`](HACKATHON_TECHNICAL.md)** for the full variable list (`DGENE_COMPILE_MODE`, RAG-first knobs, slot-template, NCBI, snapshots, streaming, etc.).
+Create **`.env`** at the repo root (optional; loaded in `inference.py`, **does not override** existing environment variables). See **[`.env.example`](.env.example)** and **§10 of [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md)** for the full variable list (`DGENE_COMPILE_MODE`, RAG-first knobs, slot-template, NCBI, snapshots, streaming, etc.).
 
 **Minimum for hosted demo:** `GEMINI_API_KEY` or `GOOGLE_API_KEY`, and usually `DGENE_GEMINI_MODEL` (e.g. `gemma-4-31b-it`).
 
@@ -195,8 +217,9 @@ streamlit run app.py
 | [`design_expert_lint.py`](design_expert_lint.py), [`expert_review.py`](expert_review.py) | Regulatory lint + optional Gemma reviewer |
 | [`passes.py`](passes.py), [`ranker.py`](ranker.py) | Diagnostics + Pareto / ranking |
 | [`app.py`](app.py) | Streamlit legacy playground |
-| [`igem_dataset.jsonl`](igem_dataset.jsonl) | Registry-derived parts corpus |
-| [`extract_igem_dataset.py`](extract_igem_dataset.py), [`generate_gemma_train.py`](generate_gemma_train.py) | Dataset / training JSONL builders |
+| [`data/igem_dataset.jsonl`](data/igem_dataset.jsonl), [`data/gemma_train.jsonl`](data/gemma_train.jsonl), [`data/xml_parts.xml.gz`](data/xml_parts.xml.gz) | Registry corpus, optional training JSONL, optional raw iGEM XML export |
+| [`scripts/extract_igem_dataset.py`](scripts/extract_igem_dataset.py), [`scripts/generate_gemma_train.py`](scripts/generate_gemma_train.py) | Dataset / Gemma 4 training JSONL builders |
+| [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/diagrams/`](docs/diagrams/) | Technical spec, architecture write-up, diagram sources + renders |
 | [`railway.toml`](railway.toml), [`nixpacks.toml`](nixpacks.toml), [`Procfile`](Procfile), [`runtime.txt`](runtime.txt) | Railway / Nixpacks deploy hints |
 
 Gitignored / generated: `.chroma_igem/`, `.design_snapshots/`, `finetune_results/`, etc.
@@ -205,7 +228,7 @@ Gitignored / generated: `.chroma_igem/`, `.design_snapshots/`, `finetune_results
 
 ## Limitations
 
-Outputs are **not** wet-lab validated. Legacy RAG uses **similarity and proportional chunks** — treat map **`*`** markers and **`rag.parts`** as cues. **Slot-template** does not replace **`circuit_verify`** truth-table proofs unless **`circuit_synth`** also applies. See **§11** in [`HACKATHON_TECHNICAL.md`](HACKATHON_TECHNICAL.md).
+Outputs are **not** wet-lab validated. Legacy RAG uses **similarity and proportional chunks** — treat map **`*`** markers and **`rag.parts`** as cues. **Slot-template** does not replace **`circuit_verify`** truth-table proofs unless **`circuit_synth`** also applies. See **§11** in [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md).
 
 ---
 

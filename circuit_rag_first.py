@@ -45,7 +45,7 @@ _ORDERED_LINE = re.compile(
 )
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "igem_dataset.jsonl")
+_DEFAULT_JSONL = os.path.join(_MODULE_DIR, "data", "igem_dataset.jsonl")
 
 _JSONL_INDEX_LOCK = threading.Lock()
 _JSONL_BY_NAME: Optional[Dict[str, dict]] = None
@@ -785,7 +785,7 @@ def run_rag_first_single(
     )
     if not menu:
         raise RuntimeError(
-            "RAG-first retrieval returned an empty part menu — check igem_dataset.jsonl and Chroma index."
+            "RAG-first retrieval returned an empty part menu — check data/igem_dataset.jsonl and Chroma index."
         )
     compiler_out = run_compiler(
         user_prompt,
