@@ -4,8 +4,10 @@ Flow: extract biological intent (Gemma) → Chroma retrieval (top-k per query) �
 part menu → Gemma may issue native ``search_igem_registry`` tool calls for extra Chroma lookups →
 ordered BBa list → concatenate ``sequence`` fields from the registry.
 
-Requires hosted Gemma (same API key as ``inference.generate_text_gemma4``). The **default** web compile
-mode is ``DGENE_COMPILE_MODE=circuit_synth`` (:mod:`circuit_pipeline`); set ``DGENE_COMPILE_MODE=rag_first``
+Hosted API supports mid-compile tools; **GGUF** runs the same prompts locally but **cannot** execute
+Gemini ``functionCall`` rounds — retrieval stays on the initial menu + deterministic assembly.
+
+The **default** web compile mode is ``DGENE_COMPILE_MODE=circuit_synth`` (:mod:`circuit_pipeline`); set ``DGENE_COMPILE_MODE=rag_first``
 for this path exclusively. Legacy channel-DNA compile stays available via ``DGENE_COMPILE_MODE=legacy``.
 """
 from __future__ import annotations
@@ -86,11 +88,11 @@ def compile_mode() -> str:
 
 
 def rag_first_configured() -> bool:
-    """RAG-first needs hosted Gemma (API key) for intent + compiler calls."""
+    """True when intent + compiler LLM calls can run (hosted API key or GGUF backend)."""
 
-    from inference import _pick_google_api_key
+    from inference import hosted_generation_ready
 
-    return bool(_pick_google_api_key())
+    return hosted_generation_ready()
 
 
 def rag_first_top_k_per_query() -> int:

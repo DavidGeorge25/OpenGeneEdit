@@ -572,7 +572,8 @@ def _compile(
     elif mode in ("circuit_synth", "rag_first") and not rag_first_configured():
         sys.stderr.write(
             "[oge/server] "
-            f"DGENE_COMPILE_MODE={mode} but no GEMINI_API_KEY / GOOGLE_API_KEY — "
+            f"DGENE_COMPILE_MODE={mode} but hybrid LLM unavailable "
+            "(need GEMINI_API_KEY / GOOGLE_API_KEY or local GGUF via DGENE_GGUF_PATH) — "
             "falling back to legacy channel compile.\n"
         )
         compile_progress(
@@ -785,8 +786,9 @@ def _run_compile_job(job_id: str, prompt: str, n: int) -> None:
             )
         elif job_mode in ("circuit_synth", "rag_first") and not rag_first_configured():
             sys.stderr.write(
-                f"[oge/server] DGENE_COMPILE_MODE={job_mode} but no GEMINI_API_KEY / "
-                "GOOGLE_API_KEY — falling back to legacy channel compile.\n"
+                f"[oge/server] DGENE_COMPILE_MODE={job_mode} but hybrid LLM unavailable "
+                "(need GEMINI_API_KEY / GOOGLE_API_KEY or local GGUF via DGENE_GGUF_PATH) — "
+                "falling back to legacy channel compile.\n"
             )
             compile_progress(
                 "compile · WARN · hosted Gemma API key required — using legacy inference+RAG…"

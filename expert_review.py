@@ -1,4 +1,7 @@
-"""Optional hosted-Gemma 'PhD reviewer' pass over an ordered part list (extra API call)."""
+"""Optional Gemma 'PhD reviewer' pass over an ordered part list (extra completion).
+
+Runs via ``generate_text_gemma4_custom`` — hosted API or local GGUF per ``get_backend()``.
+"""
 from __future__ import annotations
 
 import json
@@ -55,11 +58,11 @@ def _load_desc_map(ordered: List[str]) -> Dict[str, str]:
 
 
 def expert_gemma_review(user_prompt: str, ordered_bb_as: List[str]) -> Optional[dict]:
-    """Return parsed reviewer JSON, or ``None`` if skipped (no API key / empty list)."""
+    """Return parsed reviewer JSON, or ``None`` if skipped (no LLM / empty list)."""
 
-    from inference import _pick_google_api_key, generate_text_gemma4_custom
+    from inference import generate_text_gemma4_custom, hosted_generation_ready
 
-    if not _pick_google_api_key():
+    if not hosted_generation_ready():
         return None
     if not ordered_bb_as:
         return None

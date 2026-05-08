@@ -9,7 +9,11 @@ Backends:
     ``functionDeclarations`` (multi-turn tool loop — non-streaming).
 
   • **Local Gemma GGUF**: ``DGENE_GGUF_PATH`` pointing at a ``.gguf`` file plus
-    ``llama-cpp-python``.
+    ``llama-cpp-python``. When ``DGENE_INFERENCE=gguf``/``auto`` selects GGUF,
+    ``generate_text_gemma4`` / ``generate_text_gemma4_custom`` run on the local
+    checkpoint (same chat template as legacy compile). **Gemini-native compiler
+    tools** (``functionCall`` / ``search_igem_registry`` mid-generation) are **not**
+    available on GGUF — the compiler falls back to menu-only context.
 
 ``DGENE_INFERENCE``:
 
@@ -508,6 +512,23 @@ def _pick_google_api_key() -> Optional[str]:
         if v:
             return v
     return None
+
+
+def _backend_is_gguf(backend: object) -> bool:
+    return getattr(backend, "backend_kind", None) == "fine_tuned"
+
+
+_GGUF_COMPILER_TOOLS_NOTE = False
+
+
+def _dedupe_str_sequence(seq: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
 
 
 def _gemini_prompt_template(user_design_brief: str) -> str:
@@ -1320,10 +1341,48 @@ def generate_text_gemma4_custom(
 
     Pass ``stop_sequences=[]`` to disable stop sequences (needed for JSON intent extraction).
 
+    When the active backend is **GGUF** (:func:`get_backend`), completions run locally and
+    ``igem_tools`` is ignored (no Gemini ``functionCall`` protocol).
+
     ``igem_tools``: attach native Gemini ``functionDeclarations`` for ``search_igem_registry``
     (Chroma-backed). Uses multi-turn ``generateContent`` (**non-streaming**). Disable globally with
     ``DGENE_GEMINI_IGEM_TOOLS=0``.
     """
+
+    max_out = (
+        max_output_tokens
+        if max_output_tokens is not None
+        else _gemini_max_output_tokens()
+    )
+    use_tools = bool(igem_tools) and _gemini_env_bool("DGENE_GEMINI_IGEM_TOOLS", True)
+
+    backend = get_backend()
+    if _backend_is_gguf(backend):
+        global _GGUF_COMPILER_TOOLS_NOTE
+        if use_tools and not _GGUF_COMPILER_TOOLS_NOTE:
+            print(
+                "[oge/infer] GGUF backend: search_igem_registry tool loop disabled "
+                "(Gemini functionCall not available locally).",
+                file=sys.stderr,
+            )
+            _GGUF_COMPILER_TOOLS_NOTE = True
+        cc = getattr(backend, "complete_chat", None)
+        if not callable(cc):
+            raise RuntimeError("GGUF backend missing complete_chat")
+        text = str(
+            cc(
+                system_instruction=system_instruction,
+                user_message=user_message.strip(),
+                temperature=temperature,
+                max_tokens=max_out,
+                stop_sequences=stop_sequences,
+                debug_ctx=debug_ctx,
+            )
+        ).strip()
+        if not text:
+            raise RuntimeError("Gemma 4 returned empty text.")
+        _stderr_gemma_reply_preview(debug_ctx, text)
+        return text
 
     key = _pick_google_api_key()
     if not key:
@@ -1331,12 +1390,6 @@ def generate_text_gemma4_custom(
             "Set GEMINI_API_KEY or GOOGLE_API_KEY to call hosted Gemma 4."
         )
     mid = _default_gemma_hosted_model_id()
-    max_out = (
-        max_output_tokens
-        if max_output_tokens is not None
-        else _gemini_max_output_tokens()
-    )
-    use_tools = bool(igem_tools) and _gemini_env_bool("DGENE_GEMINI_IGEM_TOOLS", True)
     if use_tools:
         reset_igem_tool_merge_rows()
         text = _gemini_generate_custom_with_igem_tools(
@@ -1373,7 +1426,37 @@ def generate_text_gemma4(
     temperature: float = 0.2,
     max_output_tokens: Optional[int] = None,
 ) -> str:
-    """Single text completion via hosted Gemma 4 (configured API key + DGENE_GEMINI_MODEL)."""
+    """Single text completion via hosted Gemma **or** local GGUF (same as :func:`get_backend`)."""
+
+    max_out = (
+        max_output_tokens
+        if max_output_tokens is not None
+        else _gemini_max_output_tokens()
+    )
+    sys_parts = (
+        _GEMINI_SYSTEM_STOP_INSTRUCTION + "\n\n" + system_message
+        if system_message
+        else _GEMINI_SYSTEM_STOP_INSTRUCTION
+    )
+
+    backend = get_backend()
+    if _backend_is_gguf(backend):
+        cc = getattr(backend, "complete_chat", None)
+        if not callable(cc):
+            raise RuntimeError("GGUF backend missing complete_chat")
+        text = str(
+            cc(
+                system_instruction=sys_parts,
+                user_message=user_message,
+                temperature=temperature,
+                max_tokens=max_out,
+                stop_sequences=None,
+                debug_ctx="generate_text_gemma4",
+            )
+        ).strip()
+        if not text:
+            raise RuntimeError("Gemma 4 returned empty text.")
+        return text
 
     key = _pick_google_api_key()
     if not key:
@@ -1383,19 +1466,10 @@ def generate_text_gemma4(
     mid = _default_gemma_hosted_model_id()
     gen_cfg: dict = {
         "temperature": temperature,
-        "maxOutputTokens": (
-            max_output_tokens
-            if max_output_tokens is not None
-            else _gemini_max_output_tokens()
-        ),
+        "maxOutputTokens": max_out,
     }
     _apply_optional_thinking_config(gen_cfg)
     _apply_gemini_stop_sequences(gen_cfg)
-    sys_parts = (
-        _GEMINI_SYSTEM_STOP_INSTRUCTION + "\n\n" + system_message
-        if system_message
-        else _GEMINI_SYSTEM_STOP_INSTRUCTION
-    )
     body: dict = {
         "contents": [{"parts": [{"text": user_message}]}],
         "systemInstruction": {"parts": [{"text": sys_parts}]},
@@ -1561,6 +1635,7 @@ class GGUFBackend:
         self.model_path = os.path.abspath(model_path)
         self.gguf_filename = os.path.basename(self.model_path)
         self.name = "Gemma-4 FT"
+        self._llama_lock = threading.Lock()
         self._llm = Llama(
             model_path=self.model_path,
             n_ctx=int(os.environ.get("DGENE_GGUF_CTX", "4096")),
@@ -1577,6 +1652,52 @@ class GGUFBackend:
             "<|channel>thought\n"
         )
 
+    def complete_chat(
+        self,
+        *,
+        system_instruction: str,
+        user_message: str,
+        temperature: float,
+        max_tokens: int,
+        stop_sequences: Optional[List[str]],
+        debug_ctx: str,
+    ) -> str:
+        """Single-turn chat completion for JSON/intent/expert prompts (hosted-Gemma parity path).
+
+        Uses the same ``<|user|>`` / ``<|assistant|>`` framing as legacy DNA compile.
+        ``stop_sequences`` matches :func:`generate_text_gemma4_custom`: ``None`` adds
+        ``</circuit>``-style stops; ``[]`` minimizes stops for JSON; non-empty lists pass
+        caller-defined boundaries plus EOS/role tokens.
+        """
+
+        sys_inst = (system_instruction or "").strip()
+        user_msg = (user_message or "").strip()
+        prompt = f"<|user|>\n{sys_inst}\n\n{user_msg}\n<|assistant|>\n"
+        if stop_sequences is None:
+            stops = _dedupe_str_sequence(list(_GEMINI_STOP_SEQUENCES) + ["</s>", "<|user|>"])
+        elif len(stop_sequences) == 0:
+            stops = ["</s>", "<|user|>"]
+        else:
+            stops = _dedupe_str_sequence(list(stop_sequences) + ["</s>", "<|user|>"])
+
+        compile_progress(
+            f"gguf · {debug_ctx} · chat · max_tokens={max_tokens} · T={temperature:g}…"
+        )
+        infer_debug_log(f"{debug_ctx} gguf_chat prompt_chars={len(prompt)} stop_count={len(stops)}")
+        cap = max(32, min(max_tokens, int(os.environ.get("DGENE_GGUF_CHAT_MAX_TOKENS", "8192"))))
+        seed = _seed_for(debug_ctx + "\n" + user_msg[:2048], 0)
+        with self._llama_lock:
+            res = self._llm(
+                prompt,
+                max_tokens=cap,
+                temperature=float(temperature),
+                top_p=0.95,
+                top_k=40,
+                seed=seed,
+                stop=stops,
+            )
+        return str(res["choices"][0].get("text") or "")
+
     def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
         """Yield each local sample so async compile jobs can update the UI incrementally."""
 
@@ -1587,15 +1708,16 @@ class GGUFBackend:
             compile_progress(
                 f"gguf · candidate {i + 1}/{n} · sample T={temps[i % len(temps)]}…"
             )
-            res = self._llm(
-                formatted,
-                max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
-                temperature=temps[i % len(temps)],
-                top_p=0.95,
-                top_k=40,
-                seed=_seed_for(prompt, i),
-                stop=["</s>", "<|user|>", "</circuit>"],
-            )
+            with self._llama_lock:
+                res = self._llm(
+                    formatted,
+                    max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
+                    temperature=temps[i % len(temps)],
+                    top_p=0.95,
+                    top_k=40,
+                    seed=_seed_for(prompt, i),
+                    stop=["</s>", "<|user|>", "</circuit>"],
+                )
             text = res["choices"][0]["text"]
             full = formatted + text
             try:
@@ -1711,6 +1833,22 @@ def get_backend() -> object:
             _BACKEND_FAILURE = exc
             raise
         return _INFER_BACKEND
+
+
+def hosted_generation_ready() -> bool:
+    """True when circuit/RAG-first JSON and compiler LLM calls can run.
+
+    Satisfied by a Google API key **or** a successfully initialized GGUF backend
+    (``DGENE_INFERENCE=gguf`` / ``auto`` with ``DGENE_GGUF_PATH``).
+    """
+
+    if _pick_google_api_key():
+        return True
+    try:
+        b = get_backend()
+    except Exception:
+        return False
+    return _backend_is_gguf(b)
 
 
 # ---------------------------------------------------------------------------

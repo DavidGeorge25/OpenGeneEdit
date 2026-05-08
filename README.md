@@ -6,8 +6,8 @@ Trace **hosted Gemma 4** and **optional local GGUF** in **[`inference.py`](infer
 
 | Entry point | Role |
 |-------------|------|
-| **`generate_text_gemma4`** / **`generate_text_gemma4_custom`** | Google Generative Language API (`DGENE_GEMINI_MODEL`, default **`gemma-4-31b-it`**); retries, streaming, tool payloads. |
-| **`_gemini_generate_custom_with_igem_tools`** | Multi-turn **`functionCall`** / **`functionResponse`** loop with **`search_igem_registry`** during compile. |
+| **`generate_text_gemma4`** / **`generate_text_gemma4_custom`** | Same Google API **or**, when **`get_backend()`** is GGUF, **local `complete_chat`** (intent JSON, RAG-first compiler, training-data scripts). Compiler **`search_igem_registry`** tool rounds stay **hosted-only**. |
+| **`_gemini_generate_custom_with_igem_tools`** | Multi-turn **`functionCall`** / **`functionResponse`** with **`search_igem_registry`** (**hosted API only**; skipped on GGUF). |
 | **`get_backend`** → **`run_inference`** | Resolves **`DGENE_INFERENCE`** (`auto` chooses Gemini vs **`llama-cpp-python`** when **`DGENE_GGUF_PATH`** is set). |
 | **`parse_thought_and_sequence`** | Parses channel-tagged model output (`<|channel>thought` … `</circuit>`) used in legacy and training formats. |
 
@@ -82,7 +82,7 @@ Use a **recent** llama.cpp build so **Gemma 4** is supported. The terminal print
 
 ## Architecture summary
 
-Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `inference.py`) or local **GGUF** via [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python). Hosted Gemma is required for **boolean intent extraction**, **RAG-first intent/menu compilers**, **`/api/fix`**, and optional **`expert_review`**; GGUF applies to **legacy** channel DNA generation when configured (`DGENE_INFERENCE`).
+Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `inference.py`) or local **GGUF** via [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python). **`generate_text_gemma4`** / **`generate_text_gemma4_custom`** follow whichever backend **`get_backend()`** selects, so **circuit_synth** / **rag_first** can run entirely on GGUF when **`DGENE_INFERENCE=gguf`** (no API key). Mid-compile **`search_igem_registry`** tool loops remain **hosted-only**; GGUF uses the initial retrieval menu only. **`/api/fix`** and **`expert_review`** use the same text-completion path and therefore work on GGUF too.
 
 ### Architecture diagrams
 
@@ -102,7 +102,7 @@ Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `infere
 | **`rag_first`** | Intent JSON → **`build_part_menu`** → menu-constrained compiler → **`assemble_sequence`** (registry DNA only). |
 | **`legacy`** | Gemma emits `<|channel>thought` + DNA + `</circuit>` → **`parse_thought_and_sequence`** → **`apply_rag_substitution`** (equal-chunk slots + Chroma + optional **NCBI Gene**). |
 
-If **`circuit_synth`** or **`rag_first`** is selected but **no** `GEMINI_API_KEY` / `GOOGLE_API_KEY` is set, **`server.py` falls back to legacy** and logs a warning.
+If **`circuit_synth`** or **`rag_first`** is selected but neither **`GEMINI_API_KEY` / `GOOGLE_API_KEY`** nor a usable **GGUF** backend is configured (`hosted_generation_ready` / `rag_first_configured`), **`server.py` falls back to legacy** and logs a warning.
 
 ### iGEM data & RAG
 

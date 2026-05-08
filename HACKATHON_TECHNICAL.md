@@ -12,10 +12,10 @@
 
 | Backend | Env | Role |
 |--------|-----|------|
-| Hosted | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `DGENE_GOOGLE_API_KEY`, `DGENE_GEMINI_MODEL` | Default when keys exist (`DGENE_INFERENCE=auto`). Used for **circuit intent**, **RAG-first intent/menu/compiler**, **`search_igem_registry`** tool loop, **`/api/fix`**, **`expert_review`**, **`generate_gemma_train.py`**. |
-| Local GGUF | `DGENE_GGUF_PATH`, optional `DGENE_GGUF_CTX`, `DGENE_GGUF_GPU_LAYERS`, `DGENE_GGUF_MAX_TOKENS` | **`GGUFBackend`** — sampling with channel-tagged prompts; typical use: **`DGENE_COMPILE_MODE=legacy`** or forcing **`DGENE_INFERENCE=gguf`** when keys are absent. |
+| Hosted | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `DGENE_GOOGLE_API_KEY`, `DGENE_GEMINI_MODEL` | Default when keys exist (`DGENE_INFERENCE=auto`). **Mid-compile** **`search_igem_registry`** tool loop is **hosted-only**. |
+| Local GGUF | `DGENE_GGUF_PATH`, optional `DGENE_GGUF_CTX`, `DGENE_GGUF_GPU_LAYERS`, `DGENE_GGUF_MAX_TOKENS`, `DGENE_GGUF_CHAT_MAX_TOKENS` | **`GGUFBackend`** — legacy channel sampling **and** **`generate_text_gemma4`** / **`generate_text_gemma4_custom`** (intent JSON, RAG-first compiler, expert review) when **`DGENE_INFERENCE=gguf`** or **`auto`** without API keys. Compiler tools are disabled on GGUF. |
 
-**Important:** `circuit_synth` and `rag_first` require **`rag_first_configured()`** (hosted API key). If the mode is `circuit_synth` or `rag_first` but no key is set, **`server.py`** falls back to **legacy** `backend.generate` + post-hoc RAG (**stderr warning**). **`circuit_pipeline.compile_hybrid_variants_iter`** raises if there is **no** topology candidate **and** no API key for RAG-first.
+**Important:** `circuit_synth` and `rag_first` require **`hosted_generation_ready()`** (`rag_first_configured()`): either an API key **or** an initialized GGUF backend. If neither applies, **`server.py`** falls back to **legacy** `backend.generate` + post-hoc RAG (**stderr warning**). **`circuit_pipeline.compile_hybrid_variants_iter`** raises if there is **no** topology candidate **and** hybrid LLM steps cannot run.
 
 ---
 
@@ -71,7 +71,7 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 | `circuit_rag_first.py` | **`extract_intent_json`**, **`build_part_menu`**, **`run_compiler`** (tools on), **`parse_ordered_bba`**, **`assemble_sequence`**, variant iterators + temps. |
 | `slot_template_compile.py` | Deterministic Promoter/RBS/CDS/Terminator cassette when **`gate` / `input_analytes` / `reporter`** parse (**AND/OR/BUF**; not NOT). |
 | `design_expert_lint.py` | Catalog promoter ↔ regulator CDS rules → **`rag.expert_lint`**. |
-| `expert_review.py` | Optional hosted Gemma JSON reviewer (**`DGENE_EXPERT_REVIEW`**) → **`rag.expert_review`**. |
+| `expert_review.py` | Optional Gemma JSON reviewer (**`DGENE_EXPERT_REVIEW`**) → **`rag.expert_review`** (hosted or GGUF). |
 | `passes.py` | ORF, GC, repeats, Type IIS, restriction map, CAI, RBS, hairpins, biosecurity stub, parse labels. |
 | `ranker.py` | Objectives, **`WEIGHTS`**, Pareto, **`pipeline_tier`**, **`prompt_alignment`**. |
 | `server.py` | **`ThreadingHTTPServer`**; static **`web/`**; **`/api/compile`**, **`/api/compile/status`**, **`/api/fix`**, **`/api/snapshot`**, **`/api/health`**. |
@@ -121,7 +121,7 @@ Async jobs (`progress: true`): **`compile_hybrid_variants_iter`** / **`run_rag_f
 
 **Steps (`circuit_rag_first`):**
 
-1. **`extract_intent_json`** (hosted Gemma, `_INTENT_SYSTEM`).
+1. **`extract_intent_json`** (Gemma via ``generate_text_gemma4_custom``, `_INTENT_SYSTEM`).
 2. **`build_part_menu`** (+ **`ensure_indexed`**).
 3. Optional **slot-template** variant first (**`slot_template_compile`**, toggles **`DGENE_SLOT_TEMPLATE`**, backbone embed **`DGENE_SLOT_TEMPLATE_EMBED_BACKBONE`**).
 4. **`run_compiler`** at temperature ladder **`rag_first_candidate_temps`** → parse **`ORDERED_PART_LIST`** / **`parse_ordered_bba`** (guards against scanning free‑form **`BBa_`** in reasoning).

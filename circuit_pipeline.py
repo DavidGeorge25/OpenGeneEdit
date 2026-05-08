@@ -165,7 +165,9 @@ def compile_hybrid_variants(
     elif need and not rag_first_configured():
         if progress_cb:
             try:
-                progress_cb("circuit_synth · WARN · no API key for RAG-first padding — fewer candidates")
+                progress_cb(
+                    "circuit_synth · WARN · hybrid LLM unavailable for RAG-first padding — fewer candidates"
+                )
             except Exception:
                 pass
     return out
@@ -195,7 +197,8 @@ def compile_hybrid_variants_iter(
     if not rag_first_configured():
         if yielded == 0:
             raise RuntimeError(
-                "Circuit synthesis produced no candidate and RAG-first needs GEMINI_API_KEY"
+                "Circuit synthesis produced no candidate and RAG-first needs "
+                "GEMINI_API_KEY / GOOGLE_API_KEY or local GGUF (DGENE_GGUF_PATH)"
             )
         return
 
