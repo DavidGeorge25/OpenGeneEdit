@@ -518,7 +518,35 @@ def _backend_is_gguf(backend: object) -> bool:
     return getattr(backend, "backend_kind", None) == "fine_tuned"
 
 
+def _int_env_bounded(name: str, default: int, *, lo: int, hi: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return max(lo, min(hi, default))
+    try:
+        return max(lo, min(hi, int(raw)))
+    except ValueError:
+        return max(lo, min(hi, default))
+
+
+def _env_truthy(name: str, *, unset_when_missing: Optional[bool] = None) -> Optional[bool]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return unset_when_missing
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 _GGUF_COMPILER_TOOLS_NOTE = False
+
+
+def _stderr_gguf_decode_hint(exc: BaseException) -> None:
+    if "llama_decode" not in str(exc).lower():
+        return
+    sys.stderr.write(
+        "[oge/infer] GGUF llama_decode error — common on Gemma 4 + Metal / unified memory "
+        "(KV cache vs GPU layers). Try DGENE_GGUF_GPU_LAYERS=0 (CPU), or fewer layers; "
+        "increase DGENE_GGUF_CTX; upgrade llama-cpp-python; optionally DGENE_GGUF_OFFLOAD_KQV=1 "
+        "after you have a stable baseline.\n"
+    )
 
 
 def _dedupe_str_sequence(seq: List[str]) -> List[str]:
@@ -1636,10 +1664,28 @@ class GGUFBackend:
         self.gguf_filename = os.path.basename(self.model_path)
         self.name = "Gemma-4 FT"
         self._llama_lock = threading.Lock()
+
+        # Gemma 4 SWA + Metal unified memory: tiny defaults (n_ctx=4096, offload_kqv=True,
+        # n_gpu_layers=-1) often hit ``llama_decode returned -3`` mid-job — prioritize stability.
+        n_ctx = _int_env_bounded("DGENE_GGUF_CTX", 8192, lo=2048, hi=262144)
+        try:
+            n_gpu_layers = int((os.environ.get("DGENE_GGUF_GPU_LAYERS") or "-1").strip() or "-1")
+        except ValueError:
+            n_gpu_layers = -1
+        n_batch = _int_env_bounded("DGENE_GGUF_N_BATCH", min(512, n_ctx), lo=64, hi=max(n_ctx, 512))
+
+        swa_full_kw = bool(_env_truthy("DGENE_GGUF_SWA_FULL", unset_when_missing=True))
+
+        okqv_choice = _env_truthy("DGENE_GGUF_OFFLOAD_KQV", unset_when_missing=None)
+        offload_kqv = okqv_choice if okqv_choice is not None else False
+
         self._llm = Llama(
             model_path=self.model_path,
-            n_ctx=int(os.environ.get("DGENE_GGUF_CTX", "4096")),
-            n_gpu_layers=int(os.environ.get("DGENE_GGUF_GPU_LAYERS", "-1")),
+            n_ctx=n_ctx,
+            n_batch=n_batch,
+            n_gpu_layers=n_gpu_layers,
+            offload_kqv=offload_kqv,
+            swa_full=swa_full_kw,
             verbose=False,
         )
 
@@ -1686,16 +1732,20 @@ class GGUFBackend:
         infer_debug_log(f"{debug_ctx} gguf_chat prompt_chars={len(prompt)} stop_count={len(stops)}")
         cap = max(32, min(max_tokens, int(os.environ.get("DGENE_GGUF_CHAT_MAX_TOKENS", "8192"))))
         seed = _seed_for(debug_ctx + "\n" + user_msg[:2048], 0)
-        with self._llama_lock:
-            res = self._llm(
-                prompt,
-                max_tokens=cap,
-                temperature=float(temperature),
-                top_p=0.95,
-                top_k=40,
-                seed=seed,
-                stop=stops,
-            )
+        try:
+            with self._llama_lock:
+                res = self._llm(
+                    prompt,
+                    max_tokens=cap,
+                    temperature=float(temperature),
+                    top_p=0.95,
+                    top_k=40,
+                    seed=seed,
+                    stop=stops,
+                )
+        except RuntimeError as exc:
+            _stderr_gguf_decode_hint(exc)
+            raise
         return str(res["choices"][0].get("text") or "")
 
     def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
@@ -1708,16 +1758,20 @@ class GGUFBackend:
             compile_progress(
                 f"gguf · candidate {i + 1}/{n} · sample T={temps[i % len(temps)]}…"
             )
-            with self._llama_lock:
-                res = self._llm(
-                    formatted,
-                    max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
-                    temperature=temps[i % len(temps)],
-                    top_p=0.95,
-                    top_k=40,
-                    seed=_seed_for(prompt, i),
-                    stop=["</s>", "<|user|>", "</circuit>"],
-                )
+            try:
+                with self._llama_lock:
+                    res = self._llm(
+                        formatted,
+                        max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
+                        temperature=temps[i % len(temps)],
+                        top_p=0.95,
+                        top_k=40,
+                        seed=_seed_for(prompt, i),
+                        stop=["</s>", "<|user|>", "</circuit>"],
+                    )
+            except RuntimeError as exc:
+                _stderr_gguf_decode_hint(exc)
+                raise
             text = res["choices"][0]["text"]
             full = formatted + text
             try:
