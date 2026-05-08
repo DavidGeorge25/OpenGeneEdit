@@ -1,5 +1,67 @@
 # OpenGeneEdit
 
+## Demo (recommended)
+
+For judging, sharing, or whenever you want **reliable speed** without tuning GPUs or downloading weights, use the hosted deployment:
+
+**[https://opengene.up.railway.app/](https://opengene.up.railway.app/)**
+
+That build runs **hosted Gemma 4** (Google AI / `gemma-4-31b-it`). Everything below is optional for developers who want **local** quantized inference.
+
+---
+
+## Local hardware requirements
+
+The OpenGeneEdit fine-tune ships as a **~31B quantized GGUF**. The common **`dgene-q4km.gguf`** (Q4_K_M) file is about **17 GiB on disk**; at runtime you also need **KV cache, Metal/CUDA buffers, and often multiple parallel slots** in tools like LM Studio. Expect:
+
+| What you have | What usually happens |
+|---------------|----------------------|
+| **Smooth local GPU** | Roughly **≥24 GB** unified memory (Apple Silicon) or **≥24 GB VRAM** (desktop GPU) so weights **plus** KV fit without **`Insufficient Memory` / `llama_decode -3`**. Use **[LM Studio](https://lmstudio.ai)** with **`DGENE_LOCAL_HTTP_URL`** (see below), or a **smaller quant** from [Hugging Face](https://huggingface.co/davidgeorge25/opengenedit-gemma-4-31b) (e.g. Q3_K_M / Q2_K). |
+| **16 GB machines** | Full GPU offload of Q4_K_M often **does not fit**; LM Studio may log Metal **out-of-memory** during warmup. Mitigations: **fewer GPU layers**, **`n_ctx` 2048 or lower**, **`n_parallel` / slots = 1**, or **CPU** (very slow). In-process **`llama-cpp-python`** on macOS can also hit Gemma 4 + Metal edge cases even when memory is tight. |
+| **CPU-only** | Can run but **compile steps take many minutes** on ~31B; heartbeats and **`DGENE_COMPILE_MODE=legacy`** help; hosted demo or API key is faster. |
+
+**Summary:** treat **local GGUF** as an advanced path. For demos and reviewers, **prefer [the Railway app](https://opengene.up.railway.app/)** or a **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** local setup without downloading the full quant.
+
+---
+
+## Local Gemma 4 (read first)
+
+OpenGeneEdit supports **two local backends**. **macOS users should prefer the HTTP one** — it sidesteps a real `llama-cpp-python` 0.3.x Metal bug for Gemma 4 SWA decoding.
+
+### Recommended: LM Studio HTTP (works on Metal today)
+
+1. Install **[LM Studio](https://lmstudio.ai)** and open it.
+2. Load **`davidgeorge25/opengenedit-gemma-4-31b`** (start with a quant that fits your RAM — see **Local hardware requirements** above; Q4_K_M needs ~24 GB+ headroom for comfortable GPU offload).
+3. Open the **Local Server** tab → **Start Server** (default `http://127.0.0.1:1234`).
+4. In **`.env`**:
+
+   ```bash
+   DGENE_LOCAL_HTTP_URL=http://127.0.0.1:1234/v1
+   DGENE_LOCAL_HTTP_MODEL=dgene-v1-q4
+   DGENE_INFERENCE=local_http
+   ```
+
+5. **`python3 server.py`** — boot prints `[inference] LocalHTTPBackend url=… model=…`. The same compile UI now POSTs to LM Studio's OpenAI-compatible **`/v1/chat/completions`** and **`/v1/completions`** endpoints. Metal works because LM Studio bundles its own up-to-date llama.cpp.
+
+### Fallback: in-process llama-cpp-python (`DGENE_GGUF_PATH`)
+
+Used when `DGENE_LOCAL_HTTP_URL` is unset and `DGENE_INFERENCE` is `auto` or `gguf`. **GPU offload is only read from `DGENE_GGUF_GPU_LAYERS`.** A `.env` line like **`n_gpu_layers=-1`** does nothing — that key is never consulted; use **`DGENE_GGUF_GPU_LAYERS=-1`** for full offload.
+
+| Platform | When **`DGENE_GGUF_GPU_LAYERS`** is **unset** (in-process fallback) |
+|----------|---------------------------------------------------------------------|
+| **macOS** | **`n_gpu_layers=0` (CPU)** — avoids common Gemma 4 SWA + Metal **`llama_decode -3`** failures |
+| **Linux** | **`n_gpu_layers=-1`** (GPU when available) |
+
+After startup, stderr prints **`[inference] GGUF load …`** with the resolved **`n_gpu_layers`**, **`n_batch`**, **`n_ubatch`**, **`swa_full`**, **`offload_kqv`**, **`flash_attn`**. On macOS with Metal offload, defaults favor stability (**`swa_full` off**, **`offload_kqv` on**, smaller batch/ubatch) unless overridden — see **[`.env.example`](.env.example)** (`DGENE_GGUF_CTX`, **`DGENE_GGUF_N_BATCH`**, **`DGENE_GGUF_N_UBATCH`**, **`DGENE_GGUF_SWA_FULL`**, **`DGENE_GGUF_OFFLOAD_KQV`**, **`DGENE_GGUF_FLASH_ATTN`**).
+
+**Auto-retry on `llama_decode -3`.** When a decode raises this error, OpenGeneEdit automatically rebuilds the llama.cpp instance with the next safer profile and retries the same call: **flip `flash_attn`** → **`swa_full=True` + large batch** → **`swa_full` + `flash_attn`** → **smaller `n_batch`/`n_ubatch`** → **smaller `n_ctx`** → **partial GPU (`n_gpu_layers=20`)** → **CPU baseline**. Each rebuild prints **`[inference] GGUF rebuild …`** so you can see the active profile. Disable via **`DGENE_GGUF_AUTO_RETRY=0`**.
+
+**Compile-mode default depends on the backend.** Hosted Gemma defaults to **`circuit_synth`** (JSON-heavy hybrid pipeline). The local GGUF fine-tune defaults to **`legacy`** instead — the **`<|channel>thought` … `</circuit>`** path it was actually trained on, with much shorter prompts than `circuit_synth`. If GGUF on CPU still feels slow, this default keeps it usable; force JSON paths explicitly with **`DGENE_COMPILE_MODE=circuit_synth`** or **`DGENE_COMPILE_MODE=rag_first`**.
+
+On CPU, ~31B GGUF steps can take many minutes; **`DGENE_GGUF_HEARTBEAT_SEC`** (default **15**) emits **`compile_progress`** heartbeats so the UI does not look frozen.
+
+---
+
 ## Gemma 4 implementation (for reviewers)
 
 Trace **hosted Gemma 4** and **optional local GGUF** in **[`inference.py`](inference.py)**:
@@ -59,7 +121,7 @@ Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps
 
    Open the printed URL (often **`http://127.0.0.1:8765/`**).
 
-**Hardware.** A **31B** quantized model is large; expect slow generations when **`DGENE_GGUF_GPU_LAYERS`** is unset on **macOS** — OpenGeneEdit defaults to **`n_gpu_layers=0` (CPU)** there because Gemma 4 SWA + full **Metal** offload often raises **`llama_decode -3`**. Set **`DGENE_GGUF_GPU_LAYERS=-1`** to try Metal (may fail until **`llama-cpp-python`** / llama.cpp align). **Linux** defaults to **`-1`** (GPU when available). GGUF CPU runs emit **`compile_progress`** heartbeats every **`DGENE_GGUF_HEARTBEAT_SEC`** (default **15s**) so jobs do not look frozen for tens of minutes. See **[`.env.example`](.env.example)**.
+**Hardware.** See **[Local GGUF: GPU layers](#local-gguf-gpu-layers-read-first)** — **`DGENE_GGUF_GPU_LAYERS`** naming, macOS vs Linux defaults, Metal tuning, and CPU heartbeats. **31B** weights need ample RAM/VRAM; upgrade **`llama-cpp-python`** if Gemma 4 + Metal misbehaves on your build.
 
 ### Same GGUF with upstream llama.cpp (`llama-server` / `llama-cli`)
 
