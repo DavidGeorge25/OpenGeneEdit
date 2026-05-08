@@ -15,6 +15,14 @@ Supervised JSONL for external SFT / LoRA → GGUF: **[`scripts/generate_gemma_tr
 
 **Architecture & APIs:** [`docs/HACKATHON_TECHNICAL.md`](docs/HACKATHON_TECHNICAL.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
+### Default: hosted API vs local GGUF (`llama-cpp-python` / llama.cpp)
+
+- **`DGENE_INFERENCE`** defaults to **`auto`**. If **`GEMINI_API_KEY`** or **`GOOGLE_API_KEY`** is set, **`auto`** uses the **Google Generative Language API** (hosted Gemma 4 over HTTPS). If **no** API key is set but **`DGENE_GGUF_PATH`** points at a valid **`.gguf`**, **`auto`** uses **[`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python)** — Python bindings that load **llama.cpp** and run inference **in-process** inside `server.py`.
+- **`DGENE_INFERENCE=gguf`** forces **local llama.cpp** inference even when API keys exist on the machine.
+- **`DGENE_INFERENCE=gemini`** (aliases: **`hosted`**, **`google`**, **`api`**) forces the **hosted API only**.
+
+**Summary:** out of the box, clones with API keys **default to the cloud API**; users who set **`DGENE_GGUF_PATH`** and **`DGENE_INFERENCE=gguf`** (or use **`auto`** without keys) run the **same pipelines on llama.cpp** via **`llama-cpp-python`**. This repo does **not** spawn the **`llama-server`** binary — it embeds llama.cpp through **`llama-cpp-python`** only.
+
 ---
 
 ## Quick start: fine-tuned model only (no Gemini API)
@@ -39,9 +47,9 @@ Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps
    DGENE_COMPILE_MODE=legacy
    ```
 
-   - **`DGENE_INFERENCE=gguf`** forces local inference even if a Gemini/Google API key is set elsewhere on your machine.  
-   - **`DGENE_COMPILE_MODE=legacy`** runs the path where **your GGUF** generates `<|channel>thought` + DNA + `</circuit>`, then iGEM RAG can substitute slots (`apply_rag_substitution`).  
-     Topology/RAG-first modes need the **hosted** API; without it they fall back to legacy anyway — setting **`legacy`** avoids extra warnings.
+   - **`DGENE_INFERENCE=gguf`** forces **`llama-cpp-python`** (llama.cpp in-process) even if a Gemini/Google API key exists elsewhere on your machine.  
+   - **`DGENE_COMPILE_MODE=circuit_synth`** (default) or **`rag_first`** can run on GGUF too (`generate_text_gemma4*` uses the local model). Mid-compile **`search_igem_registry`** **`functionCall`** loops remain **hosted-only** and are skipped locally.  
+   - **`DGENE_COMPILE_MODE=legacy`** is the classic channel-tagged DNA path (`<|channel>thought` … `</circuit>`) plus **`apply_rag_substitution`** — closer to the fine-tune’s training format.
 
 4. **Start the compiler UI**
 
