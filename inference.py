@@ -48,6 +48,7 @@ import concurrent.futures
 import errno
 import json
 import os
+import platform
 import random
 import re
 import sys
@@ -1665,13 +1666,24 @@ class GGUFBackend:
         self.name = "Gemma-4 FT"
         self._llama_lock = threading.Lock()
 
-        # Gemma 4 SWA + Metal unified memory: tiny defaults (n_ctx=4096, offload_kqv=True,
-        # n_gpu_layers=-1) often hit ``llama_decode returned -3`` mid-job — prioritize stability.
+        # Gemma 4 SWA: full Metal offload (n_gpu_layers=-1) frequently hits ``llama_decode -3``
+        # even at decode pos 0. macOS defaults to CPU layers unless DGENE_GGUF_GPU_LAYERS is set.
         n_ctx = _int_env_bounded("DGENE_GGUF_CTX", 8192, lo=2048, hi=262144)
-        try:
-            n_gpu_layers = int((os.environ.get("DGENE_GGUF_GPU_LAYERS") or "-1").strip() or "-1")
-        except ValueError:
-            n_gpu_layers = -1
+        gpu_raw = (os.environ.get("DGENE_GGUF_GPU_LAYERS") or "").strip()
+        if not gpu_raw:
+            n_gpu_layers = 0 if platform.system() == "Darwin" else -1
+            if platform.system() == "Darwin":
+                print(
+                    "[inference] GGUF macOS: DGENE_GGUF_GPU_LAYERS unset — "
+                    "n_gpu_layers=0 (CPU) for Gemma 4 SWA stability. "
+                    "Set DGENE_GGUF_GPU_LAYERS=-1 to try Metal (may raise llama_decode -3).",
+                    file=sys.stderr,
+                )
+        else:
+            try:
+                n_gpu_layers = int(gpu_raw)
+            except ValueError:
+                n_gpu_layers = -1
         n_batch = _int_env_bounded("DGENE_GGUF_N_BATCH", min(512, n_ctx), lo=64, hi=max(n_ctx, 512))
 
         swa_full_kw = bool(_env_truthy("DGENE_GGUF_SWA_FULL", unset_when_missing=True))

@@ -59,7 +59,7 @@ Use the OpenGeneEdit **GGUF** on Hugging Face instead of `GEMINI_API_KEY`. Steps
 
    Open the printed URL (often **`http://127.0.0.1:8765/`**).
 
-**Hardware.** A **31B** quantized model is large; on CPU-only boxes expect slow generations. If `llama-cpp-python` is built with CUDA or Metal, you can offload layers via **`DGENE_GGUF_GPU_LAYERS`** (see **[`.env.example`](.env.example)**).
+**Hardware.** A **31B** quantized model is large; expect slow generations when **`DGENE_GGUF_GPU_LAYERS`** is unset on **macOS** — OpenGeneEdit defaults to **`n_gpu_layers=0` (CPU)** there because Gemma 4 SWA + full **Metal** offload often raises **`llama_decode -3`**. Set **`DGENE_GGUF_GPU_LAYERS=-1`** to try Metal (may fail until **`llama-cpp-python`** / llama.cpp align). **Linux** defaults to **`-1`** (GPU when available). See **[`.env.example`](.env.example)**.
 
 ### Same GGUF with upstream llama.cpp (`llama-server` / `llama-cli`)
 
