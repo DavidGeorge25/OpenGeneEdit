@@ -57,6 +57,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -548,6 +549,39 @@ def _stderr_gguf_decode_hint(exc: BaseException) -> None:
         "increase DGENE_GGUF_CTX; upgrade llama-cpp-python; optionally DGENE_GGUF_OFFLOAD_KQV=1 "
         "after you have a stable baseline.\n"
     )
+
+
+@contextmanager
+def _gguf_generation_heartbeat(progress_label: str):
+    """Emit ``compile_progress`` while GGUF runs — CPU + 31B can take many minutes per call."""
+
+    raw = (os.environ.get("DGENE_GGUF_HEARTBEAT_SEC") or "15").strip()
+    try:
+        interval = float(raw)
+    except ValueError:
+        interval = 15.0
+    if interval <= 0:
+        yield
+        return
+
+    stop = threading.Event()
+    start = time.monotonic()
+
+    def _tick() -> None:
+        while not stop.wait(timeout=interval):
+            elapsed = time.monotonic() - start
+            compile_progress(
+                f"{progress_label} · ~{elapsed:.0f}s elapsed "
+                f"(GGUF CPU — large quantized models are slow; hosted API is faster)"
+            )
+
+    hb = threading.Thread(target=_tick, daemon=True)
+    hb.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        hb.join(timeout=min(3.0, interval + 1.0))
 
 
 def _dedupe_str_sequence(seq: List[str]) -> List[str]:
@@ -1700,6 +1734,13 @@ class GGUFBackend:
             swa_full=swa_full_kw,
             verbose=False,
         )
+        if n_gpu_layers <= 0:
+            print(
+                "[inference] GGUF on CPU — expect multi-minute waits per LLM step at ~31B; "
+                "compile traces heartbeat via DGENE_GGUF_HEARTBEAT_SEC (default 15). "
+                "Use hosted Gemma for responsiveness or DGENE_COMPILE_MODE=legacy.",
+                file=sys.stderr,
+            )
 
     def _format_prompt(self, user_prompt: str) -> str:
         # Mirrors the training format in data/gemma_train.jsonl: instruction + thought channel.
@@ -1744,17 +1785,19 @@ class GGUFBackend:
         infer_debug_log(f"{debug_ctx} gguf_chat prompt_chars={len(prompt)} stop_count={len(stops)}")
         cap = max(32, min(max_tokens, int(os.environ.get("DGENE_GGUF_CHAT_MAX_TOKENS", "8192"))))
         seed = _seed_for(debug_ctx + "\n" + user_msg[:2048], 0)
+        hb = f"gguf · {debug_ctx} · chat"
         try:
             with self._llama_lock:
-                res = self._llm(
-                    prompt,
-                    max_tokens=cap,
-                    temperature=float(temperature),
-                    top_p=0.95,
-                    top_k=40,
-                    seed=seed,
-                    stop=stops,
-                )
+                with _gguf_generation_heartbeat(hb):
+                    res = self._llm(
+                        prompt,
+                        max_tokens=cap,
+                        temperature=float(temperature),
+                        top_p=0.95,
+                        top_k=40,
+                        seed=seed,
+                        stop=stops,
+                    )
         except RuntimeError as exc:
             _stderr_gguf_decode_hint(exc)
             raise
@@ -1770,17 +1813,19 @@ class GGUFBackend:
             compile_progress(
                 f"gguf · candidate {i + 1}/{n} · sample T={temps[i % len(temps)]}…"
             )
+            hb = f"gguf · candidate {i + 1}/{n}"
             try:
                 with self._llama_lock:
-                    res = self._llm(
-                        formatted,
-                        max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
-                        temperature=temps[i % len(temps)],
-                        top_p=0.95,
-                        top_k=40,
-                        seed=_seed_for(prompt, i),
-                        stop=["</s>", "<|user|>", "</circuit>"],
-                    )
+                    with _gguf_generation_heartbeat(hb):
+                        res = self._llm(
+                            formatted,
+                            max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
+                            temperature=temps[i % len(temps)],
+                            top_p=0.95,
+                            top_k=40,
+                            seed=_seed_for(prompt, i),
+                            stop=["</s>", "<|user|>", "</circuit>"],
+                        )
             except RuntimeError as exc:
                 _stderr_gguf_decode_hint(exc)
                 raise
