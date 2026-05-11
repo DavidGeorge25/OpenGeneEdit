@@ -940,6 +940,32 @@ body.in-workspace .extras-pane {
   color: var(--text);
 }
 
+/* First-time Chroma / iGEM embedding — warn judges & first-time visitors */
+.registry-index-banner {
+  margin: 0;
+  padding: 0.55rem 0.55rem 0.6rem;
+  border-bottom: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #7f1d1d;
+  font-family: var(--font);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.registry-index-banner__title {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #b91c1c;
+  letter-spacing: 0.01em;
+  margin-bottom: 0.28rem;
+}
+
+.registry-index-banner__detail {
+  margin: 0;
+  color: #991b1b;
+}
+
 .workspace-terminal-body {
   flex: 1;
   display: flex;

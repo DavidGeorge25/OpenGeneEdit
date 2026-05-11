@@ -1969,11 +1969,55 @@ function scrollCompileOutputToLatest() {
   });
 }
 
+function hideRegistryIndexBanner() {
+  const banner = $("registryIndexBanner");
+  if (banner) banner.hidden = true;
+}
+
+/**
+ * When Chroma first embeds the iGEM JSONL, the server emits `rag · indexing…` and
+ * `rag · indexed cur/total…`. Show a red explainer so first-time hosted users do not
+ * assume the app is stuck.
+ */
+function updateRegistryIndexBannerFromCompileLines(lines) {
+  const banner = $("registryIndexBanner");
+  const detail = $("registryIndexBannerDetail");
+  if (!banner) return;
+  const text = Array.isArray(lines) ? lines.join("\n") : "";
+  const indexingStart = /rag · indexing iGEM parts/i.test(text);
+  let lastCur = 0;
+  let lastTot = 0;
+  const re = /rag · indexed (\d+)\/(\d+) parts/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    lastCur = parseInt(m[1], 10);
+    lastTot = parseInt(m[2], 10);
+  }
+  const indexingProgress = lastTot > 0 && lastCur < lastTot;
+  const indexingDone = lastTot > 0 && lastCur >= lastTot;
+  if (indexingDone) {
+    banner.hidden = true;
+    return;
+  }
+  if (indexingStart || indexingProgress) {
+    banner.hidden = false;
+    if (detail) {
+      if (indexingProgress) {
+        detail.textContent = `Embedding registry parts: ${lastCur.toLocaleString()} / ${lastTot.toLocaleString()}. This is normal on first use and can take several minutes on this server. Later compiles skip this step until the server is redeployed.`;
+      } else {
+        detail.textContent =
+          "This is normal on first use: the app builds a local iGEM search index. It can take several minutes on this host. Later compiles reuse the index and skip this step until the server is redeployed.";
+      }
+    }
+  }
+}
+
 /** Latest line in ticker; scrollback in monospace panel */
 function updateLiveCompileTrace(lines) {
   const pre = $("compileDebugLog");
   const ticker = $("compileTicker");
   const safe = Array.isArray(lines) ? lines : [];
+  updateRegistryIndexBannerFromCompileLines(safe);
   if (pre) {
     pre.textContent = safe.join("\n");
     pre.hidden = safe.length === 0;
@@ -2174,6 +2218,7 @@ function startLiveCompilePipeline() {
   compilePipelineCleanup = () => {
     clearInterval(elapsedIv);
     clearInterval(barNudge);
+    hideRegistryIndexBanner();
     if (pipe) {
       pipe.hidden = true;
       pipe.setAttribute("aria-busy", "false");

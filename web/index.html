@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="icon" href="/logo.png" type="image/png" />
-    <link rel="stylesheet" href="/css/app.css?v=20260506-toolbar-z" />
+    <link rel="stylesheet" href="/css/app.css?v=20260511-registry-banner" />
   </head>
   <body>
     <nav class="topnav">
@@ -215,6 +215,20 @@
                 <span class="workspace-terminal-elapsed" id="compileElapsed">0:00</span>
               </span>
             </header>
+            <div
+              class="registry-index-banner"
+              id="registryIndexBanner"
+              role="alert"
+              aria-live="assertive"
+              hidden
+            >
+              <strong class="registry-index-banner__title">Indexing the iGEM registry…</strong>
+              <p class="registry-index-banner__detail" id="registryIndexBannerDetail">
+                This is normal on first use: the app builds a local search index over tens of thousands of
+                parts. It can take several minutes on this host. Later compiles reuse the index and skip this
+                step until the server is redeployed.
+              </p>
+            </div>
             <div class="workspace-terminal-body">
               <div
                 id="compilePipeline"
@@ -301,6 +315,6 @@
       </div>
     </section>
 
-    <script src="/js/app.js?v=20260506-null-guard" type="module"></script>
+    <script src="/js/app.js?v=20260511-registry-banner" type="module"></script>
   </body>
 </html>
