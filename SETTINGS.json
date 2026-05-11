@@ -1,0 +1,12 @@
+{
+  "RAW_DATA_DIR": "data",
+  "CLEAN_DATA_DIR": "data",
+  "TRAIN_DATA_CLEAN_PATH": "data/gemma_train.jsonl",
+  "TEST_DATA_CLEAN_PATH": "data/test_prompts.jsonl",
+  "MODEL_DIR": "finetune_results/gemma_4_lora",
+  "CHECKPOINT_DIR": "finetune_results/gemma_4_lora",
+  "SUBMISSION_DIR": "outputs",
+  "IGEM_JSONL": "data/igem_dataset.jsonl",
+  "CHROMA_PATH": ".chroma_igem",
+  "GGUF_PATH": ""
+}

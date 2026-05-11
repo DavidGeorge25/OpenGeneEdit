@@ -1,4 +1,34 @@
-# OpenGeneEdit web stack: stdlib ThreadingHTTPServer in server.py (not WSGI — do not use gunicorn).
-# RAG / embeddings (heavy on RAM ~2GB+ recommended on first Chroma index build):
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
+# Pinned for reproducible installs (Kaggle submission B4). Regenerate with:
+#   python3 -m pip freeze
+# after `pip install -r requirements.txt` in a clean venv if you need to refresh.
+# PyTorch wheels are platform-specific; on Linux/Windows use https://pytorch.org if install fails.
+
+chromadb==1.5.8
+sentence-transformers==5.1.2
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+safetensors==0.7.0
+torch==2.8.0
+numpy==1.24.3
+scipy==1.13.1
+scikit-learn==1.6.1
+Pillow==10.0.1
+tqdm==4.67.1
+regex==2026.1.15
+requests==2.32.4
+PyYAML==6.0.3
+filelock==3.19.1
+packaging==25.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+networkx==3.2.1
+sympy==1.14.0
+biopython==1.85
+streamlit==1.50.0
+bokeh==2.4.3
+pandas==2.0.3
+dna-features-viewer==3.1.5
+
+# Optional: local GGUF inference (platform-specific wheels; not required for hosted API).
+# llama-cpp-python

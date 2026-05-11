@@ -1,6 +1,8 @@
 finetune_results/
 .chroma_igem/
 .design_snapshots/
+outputs/
+data/test_prompts.jsonl
 
 .DS_Store
 

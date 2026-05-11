@@ -10,6 +10,24 @@ That build runs **hosted Gemma 4** (Google AI / `gemma-4-31b-it`). Everything be
 
 ---
 
+## Host / competition documentation (Kaggle-style bundle)
+
+Use this when a host asks for **winner-style** write-ups and a **reproducible code archive**.
+
+| Deliverable | Location |
+|---------------|----------|
+| **Model summary (A1–A9)** — export to **PDF/Word** for non-repo reviewers | [`docs/MODEL_SUMMARY.md`](docs/MODEL_SUMMARY.md) |
+| **Path contract (B6)** — single source of truth for data/model/output dirs | [`SETTINGS.json`](SETTINGS.json) (applied by [`submission_settings.py`](submission_settings.py)) |
+| **Entry-point commands (B8)** | [`entry_points.md`](entry_points.md) |
+| **Pinned dependencies (B4)** | [`requirements.txt`](requirements.txt) |
+| **Directory tree (B5)** — regenerate after changes: `find . -type d \| LC_ALL=C sort > directory_structure.txt` | [`directory_structure.txt`](directory_structure.txt) |
+| **Extra config notes (B3)** | [`config/README.md`](config/README.md) |
+| **Top-level scripts** | [`prepare_data.py`](prepare_data.py), [`train.py`](train.py), [`predict.py`](predict.py) |
+
+**Hardware / OS for reproduction (fill in for your report):** CPU model, core count, RAM, GPU model(s) and VRAM, **OS + version** (e.g. macOS 14.x, Ubuntu 22.04), **Python** (see [`runtime.txt`](runtime.txt) for deploy pin). **Trained weights:** default inference uses **hosted** Gemma or a **downloaded GGUF**; optional LoRA merge artifacts belong under **`MODEL_DIR`** in `SETTINGS.json` (see **§B7** in `docs/MODEL_SUMMARY.md` — large files are **gitignored**; ship in the zip or link Hugging Face).
+
+---
+
 ## Local hardware requirements
 
 The OpenGeneEdit fine-tune ships as a **~31B quantized GGUF**. The common **`dgene-q4km.gguf`** (Q4_K_M) file is about **17 GiB on disk**; at runtime you also need **KV cache, Metal/CUDA buffers, and often multiple parallel slots** in tools like LM Studio. Expect:
