@@ -6,9 +6,9 @@
 
 [phases.install]
 dependsOn = ["setup"]
+# Must create /opt/venv and activate it — bare `pip` is not on PATH (exit 127).
 cmds = [
-  "pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu",
-  "pip install -r requirements-railway.txt",
+  "python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install --upgrade pip && pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements-railway.txt",
 ]
 
 [start]
