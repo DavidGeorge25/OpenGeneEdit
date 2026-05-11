@@ -1089,6 +1089,7 @@ function showLanding() {
   lastSequence = "";
   clearSnapshotFromUrl();
   updateSnapshotBar(null);
+  guidedApplyDefaultBrief();
 }
 
 function setModelLabel(model) {
@@ -1363,12 +1364,19 @@ async function maybeRestoreCompileSnapshot() {
 async function bootstrapApp() {
   await refreshBackendMeta();
   await maybeRestoreCompileSnapshot();
+  initGuidedComposer();
 }
 
 const PASS_GLYPH = { ok: "✓", warn: "!", error: "✕" };
 
 /** Pass IDs that support targeted /api/fix (fix_type matches pass_id). */
-const PASS_FIX_TYPES = new Set(["repeats", "type_iis", "cai", "rbs"]);
+const PASS_FIX_TYPES = new Set([
+  "repeats",
+  "type_iis",
+  "cai",
+  "rbs",
+  "vector_scaffold",
+]);
 
 const passFixState = {
   spinningPassId: null,
@@ -1411,7 +1419,23 @@ function renderPasses(passes, { animate } = { animate: false }) {
   $("passesCardMeta").textContent =
     `${passes.length} passes · ${(counts.ok || 0)}✓ ${(counts.warn || 0)}! ${(counts.error || 0)}✕ · ${totalMs.toFixed(1)} ms`;
 
-  passes.forEach((p, i) => {
+  const orderKey = (p, index) => {
+    if (p.pass_id === "vector_scaffold" && p.status !== "ok") return [0, index];
+    if (p.status === "error") return [1, index];
+    if (p.status === "warn") return [2, index];
+    return [3, index];
+  };
+  const sortedPasses = [...passes]
+    .map((p, index) => ({ p, index }))
+    .sort((a, b) => {
+      const [ka, ia] = orderKey(a.p, a.index);
+      const [kb, ib] = orderKey(b.p, b.index);
+      if (ka !== kb) return ka - kb;
+      return ia - ib;
+    })
+    .map((x) => x.p);
+
+  sortedPasses.forEach((p, i) => {
     let displayStatus = p.status;
     let displaySummary = p.summary || p.name || "";
     let glyph = PASS_GLYPH[p.status] || "·";
@@ -1439,22 +1463,31 @@ function renderPasses(passes, { animate } = { animate: false }) {
     if (!animate) li.classList.add("pass-row--static");
     li.dataset.status = displayStatus;
     li.style.animationDelay = animate ? `${i * 90}ms` : "0ms";
+    if (p.pass_id === "vector_scaffold" && displayStatus !== "ok") {
+      li.classList.add("pass-row--backbone-alert");
+    }
 
     let fixCellInner = "";
     if (spinPid === p.pass_id) {
       fixCellInner =
         '<span class="pass-fix-spinner" role="status" aria-label="Fix running"></span>';
     } else if (
-      p.status === "warn" &&
       PASS_FIX_TYPES.has(p.pass_id) &&
-      !(fixOverride && fixOverride.passCleared)
+      !(fixOverride && fixOverride.passCleared) &&
+      (p.status === "warn" || (p.pass_id === "vector_scaffold" && p.status === "error"))
     ) {
       fixCellInner = `<button type="button" class="pass-fix-btn" data-fix-pass="${escapeHtml(p.pass_id)}">Fix →</button>`;
     }
 
+    const backboneHead =
+      p.pass_id === "vector_scaffold" && displayStatus !== "ok"
+        ? '<div class="pass-backbone-alert-head"><span class="pass-backbone-alert-badge">Backbone missing!</span></div>'
+        : "";
+
     li.innerHTML = `
       <span class="pass-icon" aria-hidden="true">${glyph}</span>
       <div class="pass-body">
+        ${backboneHead}
         <span class="pass-name">${escapeHtml(p.pass_id)}</span>
         <span class="pass-summary">${escapeHtml(displaySummary)}</span>
       </div>
@@ -1518,7 +1551,11 @@ async function runFixFromPass(fixType) {
   if (hint) hint.textContent = `Fix running (${fixType}) · see Compiler output → Live trace`;
 
   try {
-    appendFixTerminalLine("POST /api/fix (single candidate, ~same cost as one compile variant)…");
+    appendFixTerminalLine(
+      fixType === "vector_scaffold"
+        ? "POST /api/fix (deterministic E. coli backbone wrap — no LLM recompile)…"
+        : "POST /api/fix (single candidate, ~same cost as one compile variant)…",
+    );
     const res = await fetch("/api/fix", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1526,6 +1563,7 @@ async function runFixFromPass(fixType) {
         original_prompt,
         current_sequence: cleanSeq(cand.sequence),
         fix_type: fixType,
+        source_candidate_id: cand.id,
         candidates: state.candidates,
       }),
     });
@@ -2589,6 +2627,180 @@ if (snapshotCopyBtn) {
       }, 2000);
     }
   });
+}
+
+/** Canonical inducer keys supported by ``circuit_intent`` / ``circuit_parts`` (verified-gate path). */
+const GUIDED_INDUCERS = [
+  { value: "pyocyanin", label: "Pyocyanin" },
+  { value: "lactate", label: "Lactate" },
+  { value: "iptg", label: "IPTG" },
+  { value: "atc", label: "aTc" },
+  { value: "ahl", label: "AHL (quorum)" },
+  { value: "arabinose", label: "L-Arabinose" },
+];
+
+/** First preset is the default brief on load and after “New design”. */
+const GUIDED_PRESETS = [
+  {
+    label: "AND · pyocyanin + lactate → amilCP",
+    text: "Design a plasmid for E. coli with a genetic AND gate that makes the cells produce amilCP blue pigment only in the presence of both pyocyanin and lactate.",
+  },
+  {
+    label: "OR · IPTG or arabinose → GFP",
+    text: "Design an E. coli plasmid with an OR gate: express GFP when either IPTG or L-arabinose is present (either input is sufficient).",
+  },
+  {
+    label: "NOR · neither signal → mRFP1",
+    text: "Design an E. coli plasmid with a NOR gate: produce mRFP1 red fluorescence only when neither IPTG nor L-arabinose is present.",
+  },
+  {
+    label: "NOT · GFP off when IPTG on",
+    text: "Design an E. coli plasmid with a NOT gate: produce GFP when IPTG is absent (no GFP when IPTG is present).",
+  },
+  {
+    label: "Constitutive GFP",
+    text: "Design a plasmid for E. coli that constitutively expresses GFP using a strong promoter, RBS, and terminator.",
+  },
+];
+
+function guidedInducerPhrase(value) {
+  const row = GUIDED_INDUCERS.find((x) => x.value === value);
+  return row ? row.label : value;
+}
+
+function guidedReporterPhrase(value) {
+  if (value === "amilCP") return "amilCP blue pigment";
+  if (value === "GFP") return "GFP (green fluorescent protein)";
+  if (value === "mRFP1") return "mRFP1 (red fluorescence)";
+  return value;
+}
+
+function guidedFillSelect(sel, selectedValue) {
+  if (!sel) return;
+  sel.innerHTML = "";
+  for (const { value, label } of GUIDED_INDUCERS) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+  if (selectedValue && GUIDED_INDUCERS.some((x) => x.value === selectedValue)) {
+    sel.value = selectedValue;
+  }
+}
+
+function guidedSyncGateFields() {
+  const gateEl = $("guidedGate");
+  const f2 = $("guidedFieldIn2");
+  const l1 = $("guidedLabelIn1");
+  if (!gateEl || !f2) return;
+  const gate = gateEl.value;
+  const single = gate === "NOT" || gate === "BUF";
+  f2.classList.toggle("composer-field--hidden", single);
+  if (l1) {
+    l1.textContent = single ? "Input" : "Input A";
+  }
+}
+
+function guidedApplyDefaultBrief() {
+  const ta = $("prompt");
+  const row = $("guidedPresetRow");
+  if (!ta || !GUIDED_PRESETS.length) return;
+  ta.value = GUIDED_PRESETS[0].text;
+  if (row) {
+    row.querySelectorAll(".composer-chip").forEach((c, i) => {
+      c.classList.toggle("is-selected", i === 0);
+    });
+  }
+}
+
+function guidedBuildPrompt() {
+  const gate = $("guidedGate")?.value || "AND";
+  const rep = $("guidedReporter")?.value || "amilCP";
+  const i1 = $("guidedInput1")?.value || "pyocyanin";
+  const i2 = $("guidedInput2")?.value || "lactate";
+  const out = guidedReporterPhrase(rep);
+  const a = guidedInducerPhrase(i1).toLowerCase();
+  const b = guidedInducerPhrase(i2).toLowerCase();
+
+  if (gate === "AND") {
+    return `Design a plasmid for E. coli with a genetic AND gate that makes the cells produce ${out} only when both ${a} and ${b} are present.`;
+  }
+  if (gate === "OR") {
+    return `Design an E. coli plasmid with an OR gate: produce ${out} when either ${a} or ${b} is present (either input is sufficient).`;
+  }
+  if (gate === "NAND") {
+    return `Design an E. coli plasmid with a NAND gate: produce ${out} in all conditions except when both ${a} and ${b} are present at the same time.`;
+  }
+  if (gate === "NOR") {
+    return `Design an E. coli plasmid with a NOR gate: produce ${out} only when neither ${a} nor ${b} is present.`;
+  }
+  if (gate === "NOT") {
+    return `Design an E. coli plasmid with a NOT gate: produce ${out} when ${a} is absent (no output when ${a} is present).`;
+  }
+  if (gate === "BUF") {
+    return `Design an E. coli plasmid with a genetic BUFFER (single-input) gate: produce ${out} when ${a} is present.`;
+  }
+  return `Design an E. coli plasmid: ${gate} gate producing ${out}.`;
+}
+
+function initGuidedComposer() {
+  const root = $("composerGuided");
+  const row = $("guidedPresetRow");
+  const gateEl = $("guidedGate");
+  const in1 = $("guidedInput1");
+  const in2 = $("guidedInput2");
+  const insertBtn = $("guidedInsertBtn");
+  const ta = $("prompt");
+  if (!root || !row || !ta) return;
+  if (root.dataset.guidedInit === "1") return;
+  root.dataset.guidedInit = "1";
+
+  for (const p of GUIDED_PRESETS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "composer-chip";
+    btn.textContent = p.label;
+    btn.title = p.text.length > 160 ? `${p.text.slice(0, 157)}…` : p.text;
+    btn.addEventListener("click", () => {
+      ta.value = p.text;
+      ta.focus();
+      row.querySelectorAll(".composer-chip").forEach((x) => x.classList.remove("is-selected"));
+      btn.classList.add("is-selected");
+      const hint = $("statusHint");
+      if (hint) hint.textContent = "⌘ or Ctrl + Enter to compile";
+    });
+    row.appendChild(btn);
+  }
+
+  if (!ta.value.trim()) {
+    guidedApplyDefaultBrief();
+  }
+
+  guidedFillSelect(in1, "pyocyanin");
+  guidedFillSelect(in2, "lactate");
+
+  if (gateEl) {
+    gateEl.addEventListener("change", guidedSyncGateFields);
+    guidedSyncGateFields();
+  }
+
+  if (insertBtn) {
+    insertBtn.addEventListener("click", () => {
+      const gate = gateEl?.value || "";
+      const i1 = in1?.value;
+      const i2 = in2?.value;
+      const hint = $("statusHint");
+      if ((gate === "AND" || gate === "OR" || gate === "NAND" || gate === "NOR") && i1 && i2 && i1 === i2) {
+        if (hint) hint.textContent = "Pick two different inputs for this gate.";
+        return;
+      }
+      row.querySelectorAll(".composer-chip").forEach((x) => x.classList.remove("is-selected"));
+      ta.value = guidedBuildPrompt();
+      ta.focus();
+      if (hint) hint.textContent = "⌘ or Ctrl + Enter to compile";
+    });
+  }
 }
 
 const compileBtnEl = $("compileBtn");

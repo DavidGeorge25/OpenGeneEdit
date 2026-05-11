@@ -134,3 +134,5 @@ flowchart TB
 ```
 
 For field-level env vars, API tables, and pass IDs, see **`HACKATHON_TECHNICAL.md`**.
+
+**Expanded diagram:** [`docs/diagrams/full_app_pipeline.mmd`](diagrams/full_app_pipeline.mmd) (source) · [`full_app_pipeline.svg`](diagrams/full_app_pipeline.svg) (render) — single end-to-end pipeline (deploy, APIs, compile modes, data, passes, ranking). Edit in [Mermaid Live Editor](https://mermaid.live) or re-render with `npx @mermaid-js/mermaid-cli -i docs/diagrams/full_app_pipeline.mmd -o docs/diagrams/full_app_pipeline.svg`.

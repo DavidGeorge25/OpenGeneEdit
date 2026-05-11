@@ -3,6 +3,8 @@
 Flow: extract biological intent (Gemma) → Chroma retrieval (top-k per query) → compiler prompt with
 part menu → Gemma may issue native ``search_igem_registry`` tool calls for extra Chroma lookups →
 ordered BBa list → concatenate ``sequence`` fields from the registry.
+Optional: ``DGENE_RAG_FIRST_EMBED_BACKBONE=1`` wraps cassette-sized assemblies in the same *E. coli*
+RFC10 backbone (ori + CmR + MCS) as ``circuit_synth`` / slot-template when the trace has no origin.
 
 Hosted API supports mid-compile tools; **GGUF** runs the same prompts locally but **cannot** execute
 Gemini ``functionCall`` rounds — retrieval stays on the initial menu + deterministic assembly.
@@ -81,9 +83,28 @@ def _ensure_jsonl_index() -> Dict[str, dict]:
 
 
 def compile_mode() -> str:
-    v = (os.environ.get("DGENE_COMPILE_MODE") or "circuit_synth").strip().lower()
-    if v in ("circuit_synth", "rag_first", "legacy"):
-        return v
+    """Resolve ``DGENE_COMPILE_MODE``.
+
+    Default is ``circuit_synth`` for hosted Gemma (which handles the JSON
+    intent extraction quickly). When the active backend is the local GGUF
+    fine-tune, default to ``legacy`` instead — that's the channel-tagged DNA
+    format the model was actually trained on, with much shorter prompts than
+    the hybrid pipeline. JSON-heavy modes are still selectable explicitly.
+    """
+
+    raw = (os.environ.get("DGENE_COMPILE_MODE") or "").strip().lower()
+    if raw in ("circuit_synth", "rag_first", "legacy"):
+        return raw
+    try:
+        from inference import get_backend  # local import to avoid cycles
+    except Exception:
+        return "circuit_synth"
+    try:
+        backend = get_backend()
+    except Exception:
+        return "circuit_synth"
+    if getattr(backend, "backend_kind", None) == "fine_tuned":
+        return "legacy"
     return "circuit_synth"
 
 
@@ -111,6 +132,69 @@ def rag_first_max_ordered_parts() -> int:
         return max(6, min(200, int(raw)))
     except ValueError:
         return 48
+
+
+def rag_first_embed_ecoli_backbone_enabled() -> bool:
+    """When true, wrap short RAG-first assemblies in the same RFC10 *E. coli* backbone as ``circuit_synth``."""
+
+    raw = (os.environ.get("DGENE_RAG_FIRST_EMBED_BACKBONE") or "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def rag_first_embed_backbone_max_bp() -> int:
+    """Skip embed when assembled DNA is already longer than this (likely includes a vector)."""
+
+    raw = (os.environ.get("DGENE_RAG_FIRST_EMBED_MAX_BP") or "3200").strip()
+    try:
+        return max(1500, min(30000, int(raw)))
+    except ValueError:
+        return 3200
+
+
+def _rag_trace_has_origin(trace: List[dict]) -> bool:
+    for t in trace:
+        if not isinstance(t, dict):
+            continue
+        pt = str(t.get("part_type") or "").lower()
+        if "origin" in pt:
+            return True
+        sub = str(t.get("sub") or "").lower()
+        if sub == "backbone" and int(t.get("bp") or 0) > 800:
+            return True
+    return False
+
+
+def maybe_embed_rag_first_ecoli_backbone(
+    dna: str,
+    trace: List[dict],
+    *,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, List[dict], bool]:
+    """If enabled and DNA looks like a cassette, prefix/suffix with ``circuit_synth`` scaffold DNA."""
+
+    if not rag_first_embed_ecoli_backbone_enabled():
+        return dna, trace, False
+    if not dna or not trace:
+        return dna, trace, False
+    if _rag_trace_has_origin(trace):
+        return dna, trace, False
+    if len(dna) > rag_first_embed_backbone_max_bp():
+        return dna, trace, False
+    try:
+        from slot_template_compile import embed_slot_template_in_ecoli_backbone
+
+        new_dna, new_trace = embed_slot_template_in_ecoli_backbone(dna, trace)
+        _progress(
+            progress_cb,
+            "rag_first · backbone · embedded ColE1 ori + CmR + MCS (same scaffold as circuit_synth)",
+        )
+        return new_dna, new_trace, True
+    except Exception as exc:
+        _progress(
+            progress_cb,
+            f"rag_first · backbone · WARN · embed skipped · {type(exc).__name__}: {exc}",
+        )
+        return dna, trace, False
 
 
 def rag_first_compiler_max_output_tokens() -> int:
@@ -664,7 +748,7 @@ def _rag_parts_for_ui_from_trace(
         except (TypeError, ValueError):
             sim = 1.0
         q = str(row.get("retrieval_query") or "")
-        registry = src in ("menu", "jsonl", "slot_template")
+        registry = src in ("menu", "jsonl", "slot_template", "slot_template_backbone")
         out.append(
             {
                 "part_name": pn or alt,
@@ -835,7 +919,19 @@ def run_rag_first_single(
         progress_cb,
         f"rag_first · step 5 · assembled {len(dna)} bp from {len(trace)} segments",
     )
+    bb_embed = False
+    dna, trace, bb_embed = maybe_embed_rag_first_ecoli_backbone(dna, trace, progress_cb=progress_cb)
+    if bb_embed:
+        _progress(
+            progress_cb,
+            f"rag_first · step 5b · after backbone embed · {len(dna)} bp from {len(trace)} segments",
+        )
     thought = extract_reasoning_for_display(compiler_out)
+    if bb_embed:
+        thought = (
+            f"{thought}\n\n· **Vector scaffold:** cassette wrapped in the OpenGeneEdit E. coli RFC10 "
+            "backbone (ColE1-class ori, chloramphenicol resistance, BioBrick MCS), same as `circuit_synth`."
+        )
     detail = {
         "enabled": True,
         "applied": True,
@@ -845,6 +941,7 @@ def run_rag_first_single(
         "retrieval_unique_parts": len(menu),
         "ordered_part_names": ordered,
         "assembly_trace": trace,
+        "ecoli_backbone_embed": bb_embed,
         "compiler_raw_chars": len(compiler_out),
         "compiler_raw": compiler_out,
         "map_slots": trace,
@@ -951,12 +1048,21 @@ def run_rag_first_variants_iter(
             )
             if not dna:
                 raise ValueError("assembled empty DNA (missing sequences in menu/jsonl)")
+            bb_embed = False
+            dna, trace, bb_embed = maybe_embed_rag_first_ecoli_backbone(
+                dna, trace, progress_cb=progress_cb
+            )
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             _progress(progress_cb, f"rag_first · WARN · skipped variant {i + 1}/{llm_budget} — {last_err}")
             continue
 
         thought = extract_reasoning_for_display(compiler_out)
+        if bb_embed:
+            thought = (
+                f"{thought}\n\n· **Vector scaffold:** cassette wrapped in the OpenGeneEdit E. coli RFC10 "
+                "backbone (ColE1-class ori, chloramphenicol resistance, BioBrick MCS), same as `circuit_synth`."
+            )
         detail = {
             "enabled": True,
             "applied": True,
@@ -966,6 +1072,7 @@ def run_rag_first_variants_iter(
             "retrieval_unique_parts": len(menu),
             "ordered_part_names": ordered,
             "assembly_trace": trace,
+            "ecoli_backbone_embed": bb_embed,
             "compiler_temperature": temp,
             "compiler_raw": compiler_out,
             "map_slots": trace,

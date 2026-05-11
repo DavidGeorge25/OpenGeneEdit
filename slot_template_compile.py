@@ -92,6 +92,64 @@ def _slots_from_backbone_segments(
     return out, pos
 
 
+def _ensure_cassette_trace_local_coords(
+    cassette_trace: List[dict],
+    cassette_len: int,
+) -> List[dict]:
+    """Assign contiguous cassette-local ``start_bp`` / ``end_bp`` when the trace omits coordinates."""
+
+    raw = [dict(t) for t in (cassette_trace or []) if isinstance(t, dict)]
+    segments: List[dict] = []
+    for t in raw:
+        if t.get("ok") is False:
+            continue
+        try:
+            L = int(t.get("bp") or 0)
+        except (TypeError, ValueError):
+            L = 0
+        if L <= 0:
+            continue
+        u = dict(t)
+        u["bp"] = L
+        segments.append(u)
+    if not segments:
+        if cassette_len <= 0:
+            return []
+        return [
+            {
+                "part_name": "cassette",
+                "normalized_name": "cassette",
+                "part_type": "composite",
+                "label": "Cassette",
+                "sub": "feature",
+                "ok": True,
+                "bp": cassette_len,
+                "start_bp": 1,
+                "end_bp": cassette_len,
+            }
+        ]
+    pos = 1
+    for u in segments:
+        u["start_bp"] = pos
+        u["end_bp"] = pos + int(u["bp"]) - 1
+        pos = int(u["end_bp"]) + 1
+    if cassette_len > 0 and pos - 1 != cassette_len:
+        return [
+            {
+                "part_name": "cassette",
+                "normalized_name": "cassette",
+                "part_type": "composite",
+                "label": "Cassette",
+                "sub": "feature",
+                "ok": True,
+                "bp": cassette_len,
+                "start_bp": 1,
+                "end_bp": cassette_len,
+            }
+        ]
+    return segments
+
+
 def embed_slot_template_in_ecoli_backbone(
     cassette_dna: str,
     cassette_trace: List[dict],
@@ -105,6 +163,8 @@ def embed_slot_template_in_ecoli_backbone(
     suffix_dna = "".join((bb.suffix_sequence or "").upper().split())
     cassette_clean = "".join((cassette_dna or "").upper().split())
     full = prefix_dna + cassette_clean + suffix_dna
+
+    cassette_trace = _ensure_cassette_trace_local_coords(cassette_trace, len(cassette_clean))
 
     prefix_slots, pos = _slots_from_backbone_segments(
         bb.prefix_segments, pos0=1, source_tag="slot_template_backbone"

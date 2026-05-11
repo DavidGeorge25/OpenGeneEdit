@@ -58,7 +58,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -546,8 +546,9 @@ def _stderr_gguf_decode_hint(exc: BaseException) -> None:
     sys.stderr.write(
         "[oge/infer] GGUF llama_decode error — common on Gemma 4 + Metal / unified memory "
         "(KV cache vs GPU layers). Try DGENE_GGUF_GPU_LAYERS=0 (CPU), or fewer layers; "
-        "increase DGENE_GGUF_CTX; upgrade llama-cpp-python; optionally DGENE_GGUF_OFFLOAD_KQV=1 "
-        "after you have a stable baseline.\n"
+        "lower DGENE_GGUF_CTX / DGENE_GGUF_N_BATCH / DGENE_GGUF_N_UBATCH; "
+        "set DGENE_GGUF_SWA_FULL=0; upgrade llama-cpp-python; "
+        "optional DGENE_GGUF_FLASH_ATTN=1 or DGENE_GGUF_OFFLOAD_KQV=0 as experiments.\n"
     )
 
 
@@ -1675,12 +1676,228 @@ class GeminiBackend:
         return out
 
 
+class LocalHTTPBackend:
+    """Talks to an OpenAI-compatible local server (LM Studio, ``llama-server``, …).
+
+    Provides the same surface as :class:`GGUFBackend` so the rest of the
+    pipeline doesn't care which "local Gemma" implementation is active.
+    Activated when ``DGENE_LOCAL_HTTP_URL`` is set — typically
+    ``http://127.0.0.1:1234/v1`` for LM Studio. This bypasses the
+    ``llama-cpp-python`` Metal bug for Gemma 4 (LM Studio ships its own
+    up-to-date llama.cpp build that handles Gemma 4 + Metal SWA correctly).
+    """
+
+    backend_kind = "fine_tuned"
+
+    def __init__(self, base_url: str, model_id: Optional[str] = None, api_key: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        self.model_id = (model_id or "local-model").strip() or "local-model"
+        self._api_key = (api_key or "").strip()
+        self.name = f"Local HTTP ({self.model_id})"
+        self.gguf_filename = self.model_id
+        timeout_raw = (os.environ.get("DGENE_LOCAL_HTTP_TIMEOUT_SEC") or "600").strip()
+        try:
+            self._timeout = max(30, int(timeout_raw))
+        except ValueError:
+            self._timeout = 600
+        self._endpoint_chat = f"{self.base_url}/chat/completions"
+        self._endpoint_text = f"{self.base_url}/completions"
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self._api_key:
+            h["Authorization"] = f"Bearer {self._api_key}"
+        return h
+
+    def _post_json(self, url: str, body: Dict[str, Any], debug_ctx: str) -> Dict[str, Any]:
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                payload = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"[local-http] {debug_ctx}: {exc.code} {exc.reason} — {err_body[:512]}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"[local-http] {debug_ctx}: cannot reach {url} ({exc.reason}). "
+                "Is LM Studio's local server running? Check DGENE_LOCAL_HTTP_URL."
+            ) from exc
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"[local-http] {debug_ctx}: non-JSON response from {url}: {payload[:512]!r}"
+            ) from exc
+
+    def complete_chat(
+        self,
+        *,
+        system_instruction: str,
+        user_message: str,
+        temperature: float,
+        max_tokens: int,
+        stop_sequences: Optional[List[str]],
+        debug_ctx: str,
+    ) -> str:
+        sys_inst = (system_instruction or "").strip()
+        user_msg = (user_message or "").strip()
+        if stop_sequences is None:
+            stops = _dedupe_str_sequence(list(_GEMINI_STOP_SEQUENCES))
+        elif len(stop_sequences) == 0:
+            stops = []
+        else:
+            stops = _dedupe_str_sequence(list(stop_sequences))
+
+        compile_progress(
+            f"local-http · {debug_ctx} · chat · max_tokens={max_tokens} · T={temperature:g}…"
+        )
+        infer_debug_log(
+            f"{debug_ctx} local_http_chat sys_chars={len(sys_inst)} user_chars={len(user_msg)} "
+            f"stop_count={len(stops)}"
+        )
+
+        messages: List[Dict[str, str]] = []
+        if sys_inst:
+            messages.append({"role": "system", "content": sys_inst})
+        messages.append({"role": "user", "content": user_msg})
+        body: Dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+            "top_p": 0.95,
+        }
+        if stops:
+            body["stop"] = stops[:4]  # OpenAI/LM Studio caps at 4 stops
+
+        result = self._post_json(self._endpoint_chat, body, debug_ctx)
+        choices = result.get("choices") or []
+        if not choices:
+            raise RuntimeError(
+                f"[local-http] {debug_ctx}: empty choices[] in response: {json.dumps(result)[:512]}"
+            )
+        msg = (choices[0] or {}).get("message") or {}
+        text = str(msg.get("content") or "")
+        return text
+
+    def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
+        """Yield N legacy-format candidates via the text-completion endpoint.
+
+        We send the *raw* channel-tagged prompt to ``/completions`` rather than
+        ``/chat/completions`` so the server doesn't impose its own chat template
+        on top of the fine-tune's training format.
+        """
+
+        formatted = (
+            "<|user|>\n"
+            f"{prompt}\n"
+            "<|assistant|>\n"
+            "<|channel>thought\n"
+        )
+        temps = [0.4, 0.7, 0.9, 1.1]
+        compile_progress(f"local-http · local · {n} candidates · {self.model_id}")
+        max_tokens = int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024"))
+        for i in range(n):
+            t = temps[i % len(temps)]
+            compile_progress(f"local-http · candidate {i + 1}/{n} · sample T={t}…")
+            body: Dict[str, Any] = {
+                "model": self.model_id,
+                "prompt": formatted,
+                "temperature": t,
+                "max_tokens": max_tokens,
+                "top_p": 0.95,
+                "seed": _seed_for(prompt, i),
+                "stop": ["</s>", "<|user|>", "</circuit>"],
+            }
+            result = self._post_json(self._endpoint_text, body, f"cand_{i}")
+            choices = result.get("choices") or []
+            if not choices:
+                raise RuntimeError(
+                    f"[local-http] cand_{i}: empty choices[] in response: "
+                    f"{json.dumps(result)[:512]}"
+                )
+            text = str(choices[0].get("text") or "")
+            full = formatted + text
+            try:
+                thought, sequence = parse_thought_and_sequence(full)
+            except ValueError as exc:
+                log_parse_failure(f"local-http cand_{i}", full, exc)
+                raise RuntimeError(
+                    f"Local HTTP candidate {i} is not parseable "
+                    "(expected `<|channel>thought … <channel|>` then ATCG). "
+                    "See [oge/infer] log lines above for the raw output that failed."
+                ) from exc
+            thought_ui = sanitize_thought_for_display(thought)
+            yield Candidate(
+                candidate_id=f"cand_{i}",
+                thought=thought_ui,
+                sequence=sequence,
+                strategy=f"sample_T{t}",
+                strategy_name=f"Local HTTP sample (T={t})",
+                raw=full,
+            )
+
+    def generate(self, prompt: str, n: int = 4) -> List[Candidate]:
+        return list(self.generate_iter(prompt, n))
+
+
+@dataclass
+class _GGUFProfile:
+    """A concrete set of llama.cpp constructor knobs for one Llama instance."""
+
+    n_ctx: int
+    n_batch: int
+    n_ubatch: int
+    n_gpu_layers: int
+    offload_kqv: bool
+    swa_full: bool
+    flash_attn: bool
+    label: str
+
+    def as_kwargs(self) -> Dict[str, Any]:
+        return dict(
+            n_ctx=self.n_ctx,
+            n_batch=self.n_batch,
+            n_ubatch=self.n_ubatch,
+            n_gpu_layers=self.n_gpu_layers,
+            offload_kqv=self.offload_kqv,
+            swa_full=self.swa_full,
+            flash_attn=self.flash_attn,
+            verbose=False,
+        )
+
+    def describe(self) -> str:
+        return (
+            f"{self.label}: n_gpu_layers={self.n_gpu_layers} "
+            f"n_ctx={self.n_ctx} n_batch={self.n_batch} n_ubatch={self.n_ubatch} "
+            f"swa_full={self.swa_full} offload_kqv={self.offload_kqv} "
+            f"flash_attn={self.flash_attn}"
+        )
+
+
+def _is_llama_decode_error(exc: BaseException) -> bool:
+    return "llama_decode" in str(exc).lower()
+
+
 class GGUFBackend:
     """Wraps a quantized Gemma 4 fine-tune via llama-cpp-python.
 
     Activated automatically when ``DGENE_GGUF_PATH`` env var points at a
     valid .gguf file. N candidates are generated by re-sampling at different
     temperatures + seeds — same prompt, different decodings.
+
+    On macOS, Gemma 4 + Metal SWA decoding frequently raises
+    ``llama_decode returned -3`` on the first decode. To avoid forcing the user to
+    tune env vars, the backend keeps a *fallback ladder* of safer
+    :class:`_GGUFProfile` configurations and rebuilds the Llama instance with the
+    next entry whenever a ``-3`` is observed (unless ``DGENE_GGUF_AUTO_RETRY=0``).
     """
 
     backend_kind = "fine_tuned"
@@ -1699,18 +1916,67 @@ class GGUFBackend:
         self.gguf_filename = os.path.basename(self.model_path)
         self.name = "Gemma-4 FT"
         self._llama_lock = threading.Lock()
+        self._Llama = Llama
 
+        initial = self._resolve_initial_profile()
+        self._profiles: List[_GGUFProfile] = self._build_profile_ladder(initial)
+        self._profile_idx = 0
+        self._auto_retry = bool(_env_truthy("DGENE_GGUF_AUTO_RETRY", unset_when_missing=True))
+
+        self.profile = self._profiles[0]
+        self._llm = self._instantiate_llama(self.profile)
+        self._announce_profile(self.profile, prefix="GGUF load")
+        if self.profile.n_gpu_layers == 0:
+            print(
+                "[inference] GGUF on CPU — expect multi-minute waits per LLM step at ~31B; "
+                "compile traces heartbeat via DGENE_GGUF_HEARTBEAT_SEC (default 15). "
+                "Set DGENE_COMPILE_MODE=legacy to use the channel-tagged path the model "
+                "was fine-tuned on (much shorter prompts than circuit_synth).",
+                file=sys.stderr,
+            )
+        elif self._auto_retry and len(self._profiles) > 1:
+            print(
+                f"[inference] GGUF auto-retry on llama_decode -3 enabled "
+                f"({len(self._profiles) - 1} fallback profile(s) ready). "
+                "Set DGENE_GGUF_AUTO_RETRY=0 to disable.",
+                file=sys.stderr,
+            )
+
+        if not (os.environ.get("DGENE_COMPILE_MODE") or "").strip():
+            print(
+                "[inference] GGUF backend active and DGENE_COMPILE_MODE unset — "
+                "defaulting to 'legacy' (channel-tagged DNA, matches the fine-tune training "
+                "format). Set DGENE_COMPILE_MODE=circuit_synth to force the JSON hybrid path.",
+                file=sys.stderr,
+            )
+
+    def _instantiate_llama(self, profile: "_GGUFProfile"):
+        return self._Llama(model_path=self.model_path, **profile.as_kwargs())
+
+    def _announce_profile(self, profile: "_GGUFProfile", *, prefix: str) -> None:
+        print(f"[inference] {prefix} {profile.describe()}", file=sys.stderr)
+
+    def _resolve_initial_profile(self) -> "_GGUFProfile":
         # Gemma 4 SWA: full Metal offload (n_gpu_layers=-1) frequently hits ``llama_decode -3``
         # even at decode pos 0. macOS defaults to CPU layers unless DGENE_GGUF_GPU_LAYERS is set.
         n_ctx = _int_env_bounded("DGENE_GGUF_CTX", 8192, lo=2048, hi=262144)
         gpu_raw = (os.environ.get("DGENE_GGUF_GPU_LAYERS") or "").strip()
+        if not gpu_raw:
+            legacy_gpu = (os.environ.get("n_gpu_layers") or "").strip()
+            if legacy_gpu:
+                print(
+                    "[inference] GGUF: `.env` must use DGENE_GGUF_GPU_LAYERS "
+                    "(plain `n_gpu_layers` is ignored by dotenv keys — using it now as fallback).",
+                    file=sys.stderr,
+                )
+                gpu_raw = legacy_gpu
         if not gpu_raw:
             n_gpu_layers = 0 if platform.system() == "Darwin" else -1
             if platform.system() == "Darwin":
                 print(
                     "[inference] GGUF macOS: DGENE_GGUF_GPU_LAYERS unset — "
                     "n_gpu_layers=0 (CPU) for Gemma 4 SWA stability. "
-                    "Set DGENE_GGUF_GPU_LAYERS=-1 to try Metal (may raise llama_decode -3).",
+                    "Set DGENE_GGUF_GPU_LAYERS=-1 to try Metal (auto-retry will degrade if -3).",
                     file=sys.stderr,
                 )
         else:
@@ -1718,29 +1984,184 @@ class GGUFBackend:
                 n_gpu_layers = int(gpu_raw)
             except ValueError:
                 n_gpu_layers = -1
-        n_batch = _int_env_bounded("DGENE_GGUF_N_BATCH", min(512, n_ctx), lo=64, hi=max(n_ctx, 512))
 
-        swa_full_kw = bool(_env_truthy("DGENE_GGUF_SWA_FULL", unset_when_missing=True))
+        metal_gpu = platform.system() == "Darwin" and n_gpu_layers != 0
+
+        default_batch = min(256 if metal_gpu else 512, n_ctx)
+        n_batch = _int_env_bounded("DGENE_GGUF_N_BATCH", default_batch, lo=64, hi=max(n_ctx, 512))
+
+        default_ubatch = min(n_batch, 256 if metal_gpu else n_batch)
+        n_ubatch = _int_env_bounded(
+            "DGENE_GGUF_N_UBATCH",
+            default_ubatch,
+            lo=64,
+            hi=max(n_ctx, 512),
+        )
+
+        swa_raw = _env_truthy("DGENE_GGUF_SWA_FULL", unset_when_missing=None)
+        if swa_raw is None:
+            # Compact SWA KV often avoids Metal ``llama_decode -3`` vs full-size SWA cache.
+            swa_full_kw = False if metal_gpu else True
+        else:
+            swa_full_kw = swa_raw
 
         okqv_choice = _env_truthy("DGENE_GGUF_OFFLOAD_KQV", unset_when_missing=None)
-        offload_kqv = okqv_choice if okqv_choice is not None else False
+        if okqv_choice is None:
+            offload_kqv = n_gpu_layers > 0
+        else:
+            offload_kqv = okqv_choice
 
-        self._llm = Llama(
-            model_path=self.model_path,
+        flash_raw = _env_truthy("DGENE_GGUF_FLASH_ATTN", unset_when_missing=None)
+        flash_attn_kw = False if flash_raw is None else flash_raw
+
+        return _GGUFProfile(
             n_ctx=n_ctx,
             n_batch=n_batch,
+            n_ubatch=n_ubatch,
             n_gpu_layers=n_gpu_layers,
             offload_kqv=offload_kqv,
             swa_full=swa_full_kw,
-            verbose=False,
+            flash_attn=flash_attn_kw,
+            label="initial",
         )
-        if n_gpu_layers <= 0:
-            print(
-                "[inference] GGUF on CPU — expect multi-minute waits per LLM step at ~31B; "
-                "compile traces heartbeat via DGENE_GGUF_HEARTBEAT_SEC (default 15). "
-                "Use hosted Gemma for responsiveness or DGENE_COMPILE_MODE=legacy.",
-                file=sys.stderr,
+
+    def _build_profile_ladder(self, initial: "_GGUFProfile") -> List["_GGUFProfile"]:
+        """Successive degradations to try when ``llama_decode -3`` fires.
+
+        Ordering is "least invasive" → "most invasive": flip flash_attn, shrink
+        batch/ubatch, shrink ctx, partial GPU offload, then CPU. We only emit
+        entries that *differ* from the previous one.
+        """
+
+        ladder: List[_GGUFProfile] = [initial]
+
+        def _push(p: _GGUFProfile) -> None:
+            prev = ladder[-1]
+            same = (
+                p.n_ctx == prev.n_ctx
+                and p.n_batch == prev.n_batch
+                and p.n_ubatch == prev.n_ubatch
+                and p.n_gpu_layers == prev.n_gpu_layers
+                and p.offload_kqv == prev.offload_kqv
+                and p.swa_full == prev.swa_full
+                and p.flash_attn == prev.flash_attn
             )
+            if not same:
+                ladder.append(p)
+
+        if initial.n_gpu_layers != 0:
+            # 1. Flip flash_attn — often unblocks Gemma 4 SWA decode without other changes.
+            _push(replace(initial, flash_attn=not initial.flash_attn, label="flash_attn_toggle"))
+
+            # 2. Force full-size SWA cache (the canonical workaround for Gemma 4 + Metal -3).
+            #    Keep the prompt batch *large* so token batch boundaries don't trip the bug.
+            big_batch = max(initial.n_batch, 2048)
+            big_ubatch = max(initial.n_ubatch, 512)
+            _push(
+                replace(
+                    initial,
+                    swa_full=True,
+                    flash_attn=False,
+                    offload_kqv=True,
+                    n_batch=big_batch,
+                    n_ubatch=big_ubatch,
+                    label="swa_full_metal",
+                )
+            )
+
+            # 3. Same as (2) but with flash_attn — sometimes the safer KV path needs FA.
+            _push(replace(ladder[-1], flash_attn=True, label="swa_full_flash_attn"))
+
+            # 4. Shrink batch sizes (KV-cache pressure is the usual -3 trigger).
+            small_batch = min(initial.n_batch, 128)
+            small_ubatch = min(initial.n_ubatch, 128)
+            _push(
+                replace(
+                    initial,
+                    flash_attn=initial.flash_attn,
+                    n_batch=small_batch,
+                    n_ubatch=small_ubatch,
+                    label="small_batch",
+                )
+            )
+
+            # 5. Shrink context window.
+            shrunk_ctx = max(2048, min(initial.n_ctx, 4096))
+            _push(
+                replace(
+                    ladder[-1],
+                    n_ctx=shrunk_ctx,
+                    n_batch=min(small_batch, shrunk_ctx),
+                    n_ubatch=min(small_ubatch, shrunk_ctx),
+                    label="shrunk_ctx",
+                )
+            )
+
+            # 6. Partial GPU offload (20 layers is a known-stable midpoint for Gemma 4 + Metal).
+            _push(
+                replace(
+                    ladder[-1],
+                    n_gpu_layers=20,
+                    offload_kqv=True,
+                    label="partial_gpu_20",
+                )
+            )
+
+            # 7. Pure CPU baseline — slow but historically stable for Gemma 4.
+            _push(
+                replace(
+                    initial,
+                    n_gpu_layers=0,
+                    offload_kqv=False,
+                    swa_full=True,
+                    flash_attn=False,
+                    label="cpu_safe",
+                )
+            )
+
+        return ladder
+
+    def _advance_profile_or_raise(self, exc: BaseException) -> None:
+        """Move to the next ladder entry and rebuild the Llama instance, or re-raise."""
+
+        next_idx = self._profile_idx + 1
+        if not self._auto_retry or next_idx >= len(self._profiles):
+            _stderr_gguf_decode_hint(exc)
+            raise exc
+        next_profile = self._profiles[next_idx]
+        print(
+            f"[inference] GGUF llama_decode -3 on profile '{self.profile.label}' "
+            f"→ rebuilding with '{next_profile.label}' (auto-retry).",
+            file=sys.stderr,
+        )
+        try:
+            del self._llm
+        except Exception:
+            pass
+        self._llm = self._instantiate_llama(next_profile)
+        self._profile_idx = next_idx
+        self.profile = next_profile
+        self._announce_profile(next_profile, prefix="GGUF rebuild")
+
+    def _call_llm(self, label: str, **kwargs) -> Any:
+        """Invoke ``self._llm(...)`` with auto-rebuild fallback on llama_decode -3.
+
+        Acquires :attr:`_llama_lock` so callers don't have to. Returns the raw
+        completion dict from ``llama_cpp.Llama.__call__``. The outer loop is
+        bounded by the size of :attr:`_profiles`; ``_advance_profile_or_raise``
+        re-raises once the ladder is exhausted.
+        """
+
+        while True:
+            try:
+                with self._llama_lock:
+                    return self._llm(**kwargs)
+            except RuntimeError as exc:
+                if not (self._auto_retry and _is_llama_decode_error(exc)):
+                    _stderr_gguf_decode_hint(exc)
+                    raise
+                with self._llama_lock:
+                    self._advance_profile_or_raise(exc)
 
     def _format_prompt(self, user_prompt: str) -> str:
         # Mirrors the training format in data/gemma_train.jsonl: instruction + thought channel.
@@ -1783,24 +2204,20 @@ class GGUFBackend:
             f"gguf · {debug_ctx} · chat · max_tokens={max_tokens} · T={temperature:g}…"
         )
         infer_debug_log(f"{debug_ctx} gguf_chat prompt_chars={len(prompt)} stop_count={len(stops)}")
-        cap = max(32, min(max_tokens, int(os.environ.get("DGENE_GGUF_CHAT_MAX_TOKENS", "8192"))))
+        cap = max(32, min(max_tokens, int(os.environ.get("DGENE_GGUF_CHAT_MAX_TOKENS", "768"))))
         seed = _seed_for(debug_ctx + "\n" + user_msg[:2048], 0)
         hb = f"gguf · {debug_ctx} · chat"
-        try:
-            with self._llama_lock:
-                with _gguf_generation_heartbeat(hb):
-                    res = self._llm(
-                        prompt,
-                        max_tokens=cap,
-                        temperature=float(temperature),
-                        top_p=0.95,
-                        top_k=40,
-                        seed=seed,
-                        stop=stops,
-                    )
-        except RuntimeError as exc:
-            _stderr_gguf_decode_hint(exc)
-            raise
+        with _gguf_generation_heartbeat(hb):
+            res = self._call_llm(
+                hb,
+                prompt=prompt,
+                max_tokens=cap,
+                temperature=float(temperature),
+                top_p=0.95,
+                top_k=40,
+                seed=seed,
+                stop=stops,
+            )
         return str(res["choices"][0].get("text") or "")
 
     def generate_iter(self, prompt: str, n: int = 4) -> Iterator[Candidate]:
@@ -1814,21 +2231,17 @@ class GGUFBackend:
                 f"gguf · candidate {i + 1}/{n} · sample T={temps[i % len(temps)]}…"
             )
             hb = f"gguf · candidate {i + 1}/{n}"
-            try:
-                with self._llama_lock:
-                    with _gguf_generation_heartbeat(hb):
-                        res = self._llm(
-                            formatted,
-                            max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
-                            temperature=temps[i % len(temps)],
-                            top_p=0.95,
-                            top_k=40,
-                            seed=_seed_for(prompt, i),
-                            stop=["</s>", "<|user|>", "</circuit>"],
-                        )
-            except RuntimeError as exc:
-                _stderr_gguf_decode_hint(exc)
-                raise
+            with _gguf_generation_heartbeat(hb):
+                res = self._call_llm(
+                    hb,
+                    prompt=formatted,
+                    max_tokens=int(os.environ.get("DGENE_GGUF_MAX_TOKENS", "1024")),
+                    temperature=temps[i % len(temps)],
+                    top_p=0.95,
+                    top_k=40,
+                    seed=_seed_for(prompt, i),
+                    stop=["</s>", "<|user|>", "</circuit>"],
+                )
             text = res["choices"][0]["text"]
             full = formatted + text
             try:
@@ -1865,6 +2278,23 @@ _BACKEND_FAILURE: Optional[BaseException] = None
 
 _GEMINI_MODES = frozenset({"gemini", "api", "google", "hosted"})
 _GGUF_MODES = frozenset({"gguf", "local", "finetuned"})
+_LOCAL_HTTP_MODES = frozenset({"local_http", "lmstudio", "lm_studio", "http"})
+
+
+def _local_http_settings() -> Tuple[str, str, str]:
+    """Return ``(base_url, model_id, api_key)`` from env, normalized.
+
+    ``base_url`` is empty when LM Studio / llama-server routing is not configured.
+    """
+
+    raw_url = (os.environ.get("DGENE_LOCAL_HTTP_URL") or "").strip().rstrip("/")
+    if raw_url and not raw_url.endswith("/v1"):
+        # LM Studio / llama-server expose OpenAI-compatible routes under /v1; tolerate either form.
+        if "/v1/" not in raw_url and not raw_url.endswith("/v1"):
+            raw_url = raw_url + "/v1"
+    model_id = (os.environ.get("DGENE_LOCAL_HTTP_MODEL") or "local-model").strip() or "local-model"
+    api_key = (os.environ.get("DGENE_LOCAL_HTTP_API_KEY") or "").strip()
+    return raw_url, model_id, api_key
 
 
 def _default_gemma_hosted_model_id() -> str:
@@ -1892,6 +2322,20 @@ def _create_inference_backend() -> object:
     mode = os.environ.get("DGENE_INFERENCE", "auto").strip().lower() or "auto"
     gguf_raw = os.environ.get("DGENE_GGUF_PATH", "").strip()
     api_key = _pick_google_api_key()
+    http_url, http_model, http_api_key = _local_http_settings()
+
+    if mode in _LOCAL_HTTP_MODES:
+        if not http_url:
+            raise InferenceConfigurationError(
+                "DGENE_INFERENCE requests local_http but DGENE_LOCAL_HTTP_URL is unset. "
+                "Start LM Studio's local server (or llama-server) and point this at it, e.g. "
+                "DGENE_LOCAL_HTTP_URL=http://127.0.0.1:1234/v1"
+            )
+        print(
+            f"[inference] LocalHTTPBackend url={http_url} model={http_model}",
+            file=sys.stderr,
+        )
+        return LocalHTTPBackend(http_url, http_model, http_api_key)
 
     if mode in _GEMINI_MODES:
         if not api_key:
@@ -1903,11 +2347,25 @@ def _create_inference_backend() -> object:
         return GeminiBackend(api_key, model_id)
 
     if mode in _GGUF_MODES:
+        if http_url:
+            print(
+                f"[inference] LocalHTTPBackend (gguf+http) url={http_url} model={http_model} — "
+                "DGENE_LOCAL_HTTP_URL takes precedence over in-process llama-cpp-python "
+                "(LM Studio/llama-server avoids the Gemma 4 + Metal -3 bug).",
+                file=sys.stderr,
+            )
+            return LocalHTTPBackend(http_url, http_model, http_api_key)
         gguf_path = _require_gguf_file(gguf_raw)
         print(f"[inference] GGUFBackend {gguf_path}", file=sys.stderr)
         return GGUFBackend(gguf_path)
 
     # auto
+    if http_url:
+        print(
+            f"[inference] LocalHTTPBackend (auto) url={http_url} model={http_model}",
+            file=sys.stderr,
+        )
+        return LocalHTTPBackend(http_url, http_model, http_api_key)
     if api_key:
         model_id = _default_gemma_hosted_model_id()
         print(f"[inference] GeminiBackend (auto) model={model_id}", file=sys.stderr)
@@ -1918,8 +2376,9 @@ def _create_inference_backend() -> object:
         return GGUFBackend(gguf_path)
 
     raise InferenceConfigurationError(
-        "OpenGeneEdit requires hosted Gemma 4 (GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL) "
-        "or local Gemma GGUF (DGENE_GGUF_PATH). No mock/offline inference is compiled in."
+        "OpenGeneEdit requires hosted Gemma 4 (GEMINI_API_KEY / GOOGLE_API_KEY + DGENE_GEMINI_MODEL), "
+        "a local OpenAI-compatible server (DGENE_LOCAL_HTTP_URL, e.g. LM Studio at "
+        "http://127.0.0.1:1234/v1), or in-process GGUF (DGENE_GGUF_PATH). No mock/offline inference."
     )
 
 

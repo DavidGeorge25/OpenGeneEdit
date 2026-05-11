@@ -180,12 +180,6 @@ kbd {
   border-top: 1px solid var(--line);
 }
 
-.composer-meta {
-  color: var(--muted-light);
-  display: flex;
-  align-items: center;
-}
-
 .composer-hint {
   flex: 1;
   font-size: 0.8125rem;
@@ -217,6 +211,157 @@ kbd {
 .composer-send:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Guided prompt: same composer card, minimal chrome vs. original demo */
+.composer-guided {
+  border-top: 1px solid var(--line);
+  padding: 0.75rem 1rem 0.65rem;
+  background: var(--bg-subtle);
+}
+
+.composer-quick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.composer-quick-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.composer-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.composer-chip {
+  font-family: var(--font);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-chip:hover {
+  border-color: var(--line-strong);
+  background: var(--bg);
+}
+
+.composer-chip.is-selected {
+  border-color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--text);
+}
+
+.composer-details {
+  margin-top: 0.35rem;
+  text-align: left;
+}
+
+.composer-details-summary {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  list-style-position: outside;
+  padding: 0.2rem 0;
+}
+
+.composer-details-summary:hover {
+  color: var(--text);
+}
+
+.composer-details-hint {
+  font-weight: 400;
+  color: var(--muted-light);
+}
+
+.composer-guided-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 1rem;
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 520px) {
+  .composer-guided-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.composer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.composer-field-label {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.composer-field--hidden {
+  display: none !important;
+}
+
+.composer-select {
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+
+.composer-guided-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.15rem;
+}
+
+.btn-composer-secondary {
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn-composer-secondary:hover {
+  background: var(--bg);
 }
 
 .landing-foot {
@@ -1775,6 +1920,35 @@ body.in-workspace .artifact-body > * {
 
 .pass-row[data-status="warn"]  .pass-name { color: #92400e; }
 .pass-row[data-status="error"] .pass-name { color: #991b1b; }
+
+/* Missing vector backbone — surfaced first + high contrast */
+.pass-row.pass-row--backbone-alert {
+  border: 1px solid #f87171;
+  background: linear-gradient(180deg, #fef2f2 0%, #fff 100%);
+  border-radius: 10px;
+  margin-bottom: 0.35rem;
+}
+
+.pass-backbone-alert-head {
+  margin-bottom: 0.35rem;
+}
+
+.pass-backbone-alert-badge {
+  display: inline-block;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #fff;
+  background: #dc2626;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
+
+.pass-row.pass-row--backbone-alert .pass-summary {
+  color: #991b1b;
+  font-weight: 600;
+}
 
 .pass-body {
   display: flex;

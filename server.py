@@ -43,7 +43,7 @@ finishes. When ``done`` is true, ``result`` is the final ranked payload
 (``snapshot_id`` may be attached).
 
 **Targeted fix:** ``POST /api/fix`` with ``original_prompt``, ``current_sequence``,
-``fix_type`` (``repeats`` | ``type_iis`` | ``cai`` | ``rbs`` | ``repeats_type_iis``),
+``fix_type`` (``repeats`` | ``type_iis`` | ``cai`` | ``rbs`` | ``repeats_type_iis`` | ``vector_scaffold``),
 and ``candidates`` (current workspace list) runs a single-slot recompile with an
 injected constraint, merges into the list, re-ranks, and returns ``fix`` metadata
 (``new_candidate_id``, ``new_candidate_index``, ``still_flagged``).
@@ -76,7 +76,7 @@ from inference import (  # noqa: F401
     set_compile_progress_hook,
     set_compile_stream_hook,
 )
-from passes import passes_to_dicts, run_passes
+from passes import pass_vector_scaffold, passes_to_dicts, run_passes
 from ranker import attach_fidelity_scores, rank, score_candidate, scores_to_dict
 
 
@@ -282,6 +282,153 @@ def _fix_user_still_flagged(
     improved = _fix_improved_for_type(old_passes, new_passes, fix_type) if old_passes else False
     still = not improved
     return still, False
+
+
+def _run_vector_scaffold_fix(
+    original_prompt: str,
+    current_sequence: str,
+    existing_rows: list,
+    *,
+    source_candidate_id: Optional[str] = None,
+) -> dict:
+    """Wrap cassette-sized DNA in the deterministic ``circuit_synth`` / slot-template E. coli backbone."""
+
+    from circuit_rag_first import _rag_parts_for_ui_from_trace
+    from slot_template_compile import embed_slot_template_in_ecoli_backbone
+
+    op = original_prompt.strip()
+    seq = "".join((current_sequence or "").upper().split())
+    if not op or not seq:
+        raise ValueError("original_prompt and current_sequence are required")
+    if not isinstance(existing_rows, list):
+        raise ValueError("candidates must be a list")
+
+    scr = pass_vector_scaffold(seq)
+    if scr.status == "ok":
+        raise ValueError(
+            "Vector scaffold is already OK (standard backbone found or DNA is long enough). Nothing to fix."
+        )
+
+    source_row = None
+    sid = (source_candidate_id or "").strip()
+    if sid:
+        for r in existing_rows:
+            if isinstance(r, dict) and str(r.get("id", "")).strip() == sid:
+                source_row = r
+                break
+    if source_row is None:
+        for r in existing_rows:
+            if not isinstance(r, dict):
+                continue
+            rs = "".join(str(r.get("sequence") or "").upper().split())
+            if rs == seq:
+                source_row = r
+                break
+    if not isinstance(source_row, dict):
+        raise ValueError("Could not locate the selected candidate row for this sequence.")
+
+    rag = source_row.get("rag")
+    trace_in: list = []
+    if isinstance(rag, dict):
+        tr = rag.get("assembly_trace")
+        if isinstance(tr, list):
+            trace_in = [dict(x) for x in tr if isinstance(x, dict)]
+
+    ok_bp = 0
+    for t in trace_in:
+        if t.get("ok") is False:
+            continue
+        try:
+            ok_bp += int(t.get("bp") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    cassette_trace: list = []
+    if trace_in and abs(ok_bp - len(seq)) <= max(12, len(seq) // 80):
+        for t in trace_in:
+            u = dict(t)
+            u.pop("start_bp", None)
+            u.pop("end_bp", None)
+            cassette_trace.append(u)
+    else:
+        cassette_trace = [
+            {
+                "part_name": "cassette",
+                "normalized_name": "cassette",
+                "part_type": "composite",
+                "label": "Assembled DNA (pre-fix map)",
+                "sub": "feature",
+                "ok": True,
+                "bp": len(seq),
+                "source": "vector_scaffold_fix",
+            }
+        ]
+
+    new_dna, new_trace = embed_slot_template_in_ecoli_backbone(seq, cassette_trace)
+
+    rag_out: dict = dict(rag) if isinstance(rag, dict) else {"enabled": True, "applied": True}
+    rag_out["assembly_trace"] = new_trace
+    rag_out["map_slots"] = new_trace
+    rag_out["ecoli_backbone_embed"] = True
+    rag_out["vector_scaffold_fix"] = True
+    try:
+        rag_out["parts"] = _rag_parts_for_ui_from_trace(new_trace, None)
+    except Exception:
+        prev = rag.get("parts") if isinstance(rag, dict) else None
+        rag_out["parts"] = prev if isinstance(prev, list) else []
+
+    thought = str(source_row.get("thought") or "").strip()
+    sfx = (
+        "\n\n· **Vector scaffold (fix):** cassette wrapped in the OpenGeneEdit E. coli RFC10 backbone "
+        "(ColE1-class ori, chloramphenicol resistance, BioBrick MCS), matching `circuit_synth`."
+    )
+    thought = thought + sfx if thought else sfx.strip()
+
+    passes = run_passes(new_dna)
+    scores = score_candidate(passes, len(new_dna))
+    new_id = f"cand_bb_{uuid.uuid4().hex[:10]}"
+    new_cand = {
+        "id": new_id,
+        "thought": thought,
+        "sequence": new_dna,
+        "strategy": source_row.get("strategy", "rag_first"),
+        "strategy_name": f"{source_row.get('strategy_name') or 'Candidate'} · +vector backbone",
+        "passes": passes_to_dicts(passes),
+        "scores": scores_to_dict(scores),
+        "rag": rag_out,
+        "fix_badge": "Backbone fixed",
+    }
+    attach_fidelity_scores(new_cand["scores"], prompt=op, row=new_cand)
+    _attach_design_qa(new_cand, user_prompt=op)
+
+    merged: list = [dict(r) for r in existing_rows] + [new_cand]
+    ranked = rank(merged)
+    best_id = ranked[0]["id"] if ranked else None
+    new_idx = next((i + 1 for i, c in enumerate(ranked) if c.get("id") == new_id), 0)
+    old_passes = _find_source_passes(
+        existing_rows,
+        source_candidate_id=source_candidate_id,
+        current_sequence=seq,
+    )
+    still, pass_cleared = _fix_user_still_flagged(
+        old_passes, new_cand.get("passes") or [], "vector_scaffold"
+    )
+
+    return _finalize_compile_result(
+        {
+            "candidates": ranked,
+            "best_id": best_id,
+            "model": getattr(get_backend(), "name", "unknown"),
+            "prompt": op,
+            "fix": {
+                "fix_type": "vector_scaffold",
+                "new_candidate_id": new_id,
+                "new_candidate_index": new_idx,
+                "still_flagged": still,
+                "pass_cleared": pass_cleared,
+            },
+        }
+    )
 
 
 def _health_dict() -> dict:
@@ -624,6 +771,13 @@ def _run_fix_compile(
 ) -> dict:
     """Single-candidate recompile with a constraint, merged into existing candidates."""
 
+    if fix_type == "vector_scaffold":
+        return _run_vector_scaffold_fix(
+            original_prompt,
+            current_sequence,
+            existing_rows,
+            source_candidate_id=source_candidate_id,
+        )
     if fix_type not in FIX_PROMPTS:
         raise ValueError(f"unsupported fix_type: {fix_type!r}")
     op = original_prompt.strip()

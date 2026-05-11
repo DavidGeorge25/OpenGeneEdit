@@ -547,6 +547,55 @@ def pass_biosec(seq: str) -> PassResult:
     )
 
 
+def pass_vector_scaffold(seq: str) -> PassResult:
+    """Heuristic: short DNA without the standard OpenGeneEdit / pSB-style prefix is likely cassette-only."""
+
+    t0 = _now_ms()
+    s = "".join((seq or "").upper().split())
+    L = len(s)
+    has_sig = False
+    try:
+        from circuit_parts import make_backbone_ref
+
+        pref = "".join(((make_backbone_ref().sequence) or "").upper().split())
+        if len(pref) >= 48 and pref[:48] in s:
+            has_sig = True
+    except Exception:
+        pass
+
+    if has_sig or L > 3500:
+        return PassResult(
+            pass_id="vector_scaffold",
+            name="Vector scaffold (ori + selection)",
+            category="lint",
+            status="ok",
+            summary=(
+                "ColE1 / pSB-style backbone signature detected in sequence, or construct is long enough "
+                "that a full vector is plausible."
+            ),
+            duration_ms=_now_ms() - t0,
+        )
+
+    return PassResult(
+        pass_id="vector_scaffold",
+        name="Vector / backbone",
+        category="lint",
+        status="error",
+        summary=(
+            f"Backbone missing! Only {L} bp — looks like an expression cassette without ColE1 ori + "
+            "CmR + RFC10 MCS (not a complete plasmid). Press Fix → to wrap in the standard vector scaffold."
+        ),
+        diagnostics=[
+            Diagnostic(
+                "error",
+                "Add the OpenGeneEdit E. coli backbone: click **Fix →** on this row (deterministic wrap, "
+                "no LLM). Same scaffold as topology-verified designs.",
+            ),
+        ],
+        duration_ms=_now_ms() - t0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
@@ -554,6 +603,7 @@ def pass_biosec(seq: str) -> PassResult:
 
 PASS_PIPELINE: List[Callable[[str], PassResult]] = [
     pass_parse,
+    pass_vector_scaffold,
     pass_orf,
     pass_gc,
     pass_repeats,
