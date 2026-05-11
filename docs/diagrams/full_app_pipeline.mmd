@@ -1,0 +1,145 @@
+%% OpenGeneEdit (DGene) — Full application pipeline for documentation
+%% Companion to docs/ARCHITECTURE.md. Render with https://mermaid.live or:
+%%   npx @mermaid-js/mermaid-cli -i docs/diagrams/full_app_pipeline.mmd -o docs/diagrams/full_app_pipeline.svg
+
+%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'basis', 'padding': 14}}}%%
+
+flowchart TB
+  subgraph deploy ["Deploy & process"]
+    NX[["nixpacks.toml / railway.toml → python server.py"]]
+    ENV[[".env · GEMINI_API_KEY / GOOGLE_API_KEY · DGENE_* knobs"]]
+  end
+
+  subgraph clients ["Surfaces"]
+    WEB[["web/ static UI — compiler, map, RAG audit, exports"]]
+    ST[["app.py — Streamlit playground (subset + visualizer.py maps)"]]
+  end
+
+  subgraph http ["server.py — ThreadingHTTPServer"]
+    ROOT[["GET / — index.html + assets"]]
+    H[["GET /api/health — get_backend() probe"]]
+    SNAP[["GET /api/snapshot?id= — .design_snapshots/*.json"]]
+    POSTC[["POST /api/compile — prompt, n, optional progress:true"]]
+    STAT[["GET /api/compile/status?job_id= — async partial + done"]]
+    FIX[["POST /api/fix — constrained recompile, merge, re-rank"]]
+  end
+
+  subgraph infer ["Inference backends · inference.py"]
+    BK{"get_backend()"}
+    GEM[["Hosted Gemma 4 — Generative Language API"]]
+    GGUF[["Local GGUF — llama-cpp-python"]]
+    BK --> GEM
+    BK --> GGUF
+  end
+
+  subgraph data ["Data & retrieval"]
+    JSONL[["data/igem_dataset.jsonl"]]
+    CHR[["Chroma vector index · DGENE_CHROMA_PATH"]]
+    NCBI[["ncbi_gene.py — optional Entrez CDS"]]
+    OFF[["Offline: scripts/extract_igem_dataset.py · scripts/generate_gemma_train.py"]]
+    OFF -.-> JSONL
+    JSONL -.-> CHR
+  end
+
+  subgraph mode ["Compile routing · circuit_rag_first.compile_mode()"]
+    M0{"DGENE_COMPILE_MODE + backend"}
+    M_CS[["circuit_synth — default when hosted"]]
+    M_RF[["rag_first — menu path only"]]
+    M_LG[["legacy — channel DNA + post RAG"]]
+    M_FB[["Fallback: circuit_synth/rag_first requested but rag_first_configured() false → legacy generate"]]
+    M0 -->|"explicit or hosted default"| M_CS
+    M0 -->|"explicit"| M_RF
+    M0 -->|"explicit legacy OR GGUF default"| M_LG
+    M0 -->|"hybrid modes without LLM"| M_FB
+  end
+
+  subgraph hybrid ["circuit_synth · circuit_pipeline.py"]
+    HY0[["compile_hybrid_variants*"]]
+    HY1[["circuit_intent.extract_circuit_spec — boolean JSON from Gemma"]]
+    HY2[["circuit_synth.synthesize — catalog-backed plasmid"]]
+    HY3[["circuit_verify.verify_plasmid — truth table"]]
+    HY4[["≤1 verified Candidate · pipeline=circuit_synth"]]
+    HY5[["Remaining slots → run_rag_first_variants*"]]
+    HY0 --> HY1 --> HY2 --> HY3 --> HY4
+    HY0 --> HY5
+  end
+
+  subgraph ragfirst ["RAG-first · circuit_rag_first.py"]
+    RF0[["Biological intent JSON — Gemma"]]
+    RF_ST[["Optional slot_template_compile — AND/OR/BUF cassette"]]
+    RF1[["build_part_menu — Chroma top-k per query"]]
+    RF2[["run_compiler — menu-constrained Gemma"]]
+    RF_TL[["Hosted only: search_igem_registry tool loop → more Chroma hits"]]
+    RF3[["Parse ORDERED_PART_LIST"]]
+    RF4[["assemble_sequence — JSONL concat only"]]
+    RF0 --> RF_ST
+    RF_ST --> RF1 --> RF2
+    RF2 --> RF_TL --> RF3
+    RF2 --> RF3
+    RF3 --> RF4
+  end
+
+  subgraph legacy ["Legacy · inference + igem_rag"]
+    LG1[["backend.generate — thought + DNA channels"]]
+    LG2[["parse_thought_and_sequence"]]
+    LG3[["apply_rag_substitution — slot-wise Chroma merge"]]
+    LG1 --> LG2 --> LG3
+  end
+
+  subgraph post ["Every candidate — server.py"]
+    BR{"rag_first_detail.pipeline?\ncircuit_synth | rag_first | slot_template"}
+    KEEP[["Use cand.sequence as-is — no post substitution"]]
+    SUB[["_apply_rag_substitution"]]
+    PS[["passes.run_passes — ORF, GC, repeats, Type IIS, CAI, …"]]
+    SC[["ranker.score_candidate + attach_fidelity_scores"]]
+    QA[["design_expert_lint + optional expert_review — expert_review.py"]]
+    RK[["ranker.rank — Pareto + pipeline tier preference"]]
+    SN[["_finalize_compile_result — optional snapshot_id → .design_snapshots/"]]
+    BR -->|yes| KEEP
+    BR -->|no legacy-style| SUB
+    KEEP --> PS
+    SUB --> PS
+    PS --> SC --> QA --> RK --> SN
+  end
+
+  subgraph asyncjob ["Async path · POST compile progress:true"]
+    J1[["202 + job_id"]]
+    J2[["Worker: hooks → compile_progress / stream mirrors"]]
+    J3[["Same branches as sync · iterator · partial rank per candidate"]]
+    J1 --> J2 --> J3
+  end
+
+  NX --> http
+  ENV --> infer
+  WEB --> POSTC
+  WEB --> STAT
+  WEB --> FIX
+  WEB --> H
+  WEB --> SNAP
+  ST -.->|"subset"| infer
+
+  BK -.->|"compile_mode defaults · rag_first_configured()"| M0
+
+  POSTC --> M0
+  POSTC -->|progress:true| asyncjob --> M0
+
+  FIX -->|"constraint prompt · _compile n=1 · merge list · re-rank"| M0
+
+  M_CS --> hybrid
+  M_RF --> ragfirst
+  M_FB --> legacy
+  M_LG --> legacy
+
+  HY5 --> RF0
+  CHR --> RF1
+  CHR --> RF_TL
+  CHR --> LG3
+  NCBI -.-> RF4
+  NCBI -.-> LG3
+
+  hybrid --> BR
+  ragfirst --> BR
+  legacy --> BR
+  J3 -.->|"each Candidate"| BR
+
+  SN --> WEB
