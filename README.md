@@ -2,7 +2,7 @@
 
 ## Demo (recommended)
 
-For judging, sharing, or whenever you want **reliable speed** without tuning GPUs or downloading weights, use the hosted deployment:
+For quick evaluation, sharing, or whenever you want **reliable speed** without tuning GPUs or downloading weights, use the hosted deployment:
 
 **[https://opengene.up.railway.app/](https://opengene.up.railway.app/)**
 
@@ -10,13 +10,13 @@ That build runs **hosted Gemma 4** (Google AI / `gemma-4-31b-it`). Everything be
 
 ---
 
-## Host / competition documentation (Kaggle-style bundle)
+## Documentation and reproducibility bundle
 
-Use this when a host asks for **winner-style** write-ups and a **reproducible code archive**.
+This repository includes a complete documentation and reproducibility bundle aligned to common model handoff expectations.
 
 | Deliverable | Location |
 |---------------|----------|
-| **Model summary (A1–A9)** — export to **PDF/Word** for non-repo reviewers | [`docs/MODEL_SUMMARY.md`](docs/MODEL_SUMMARY.md) |
+| **Model summary (A1–A9)** — export to **PDF/Word** when a non-Markdown deliverable is required | [`docs/MODEL_SUMMARY.md`](docs/MODEL_SUMMARY.md) |
 | **Path contract (B6)** — single source of truth for data/model/output dirs | [`SETTINGS.json`](SETTINGS.json) (applied by [`submission_settings.py`](submission_settings.py)) |
 | **Entry-point commands (B8)** | [`entry_points.md`](entry_points.md) |
 | **Pinned dependencies (B4)** | [`requirements.txt`](requirements.txt) |
@@ -24,7 +24,7 @@ Use this when a host asks for **winner-style** write-ups and a **reproducible co
 | **Extra config notes (B3)** | [`config/README.md`](config/README.md) |
 | **Top-level scripts** | [`prepare_data.py`](prepare_data.py), [`train.py`](train.py), [`predict.py`](predict.py) |
 
-**Hardware / OS for reproduction (fill in for your report):** CPU model, core count, RAM, GPU model(s) and VRAM, **OS + version** (e.g. macOS 14.x, Ubuntu 22.04), **Python** (see [`runtime.txt`](runtime.txt) for deploy pin). **Trained weights:** default inference uses **hosted** Gemma or a **downloaded GGUF**; optional LoRA merge artifacts belong under **`MODEL_DIR`** in `SETTINGS.json` (see **§B7** in `docs/MODEL_SUMMARY.md` — large files are **gitignored**; ship in the zip or link Hugging Face).
+**Hardware / OS reproduction checklist:** document CPU model, core count, RAM, GPU model(s) and VRAM, **OS + version** (e.g. macOS 14.x, Ubuntu 22.04), and **Python** version (see [`runtime.txt`](runtime.txt) for deploy pin). **Trained weights:** default inference uses **hosted** Gemma or a **downloaded GGUF**; optional LoRA merge artifacts belong under **`MODEL_DIR`** in `SETTINGS.json` (see **§B7** in `docs/MODEL_SUMMARY.md` — large files are **gitignored**; include them in your release archive or provide a Hugging Face link).
 
 ---
 
@@ -38,7 +38,7 @@ The OpenGeneEdit fine-tune ships as a **~31B quantized GGUF**. The common **`dge
 | **16 GB machines** | Full GPU offload of Q4_K_M often **does not fit**; LM Studio may log Metal **out-of-memory** during warmup. Mitigations: **fewer GPU layers**, **`n_ctx` 2048 or lower**, **`n_parallel` / slots = 1**, or **CPU** (very slow). In-process **`llama-cpp-python`** on macOS can also hit Gemma 4 + Metal edge cases even when memory is tight. |
 | **CPU-only** | Can run but **compile steps take many minutes** on ~31B; heartbeats and **`DGENE_COMPILE_MODE=legacy`** help; hosted demo or API key is faster. |
 
-**Summary:** treat **local GGUF** as an advanced path. For demos and reviewers, **prefer [the Railway app](https://opengene.up.railway.app/)** or a **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** local setup without downloading the full quant.
+**Summary:** treat **local GGUF** as an advanced path. For most usage, **prefer [the Railway app](https://opengene.up.railway.app/)** or a **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** local setup without downloading the full quant.
 
 ---
 
@@ -80,7 +80,7 @@ On CPU, ~31B GGUF steps can take many minutes; **`DGENE_GGUF_HEARTBEAT_SEC`** (d
 
 ---
 
-## Gemma 4 implementation (for reviewers)
+## Gemma 4 implementation details
 
 Trace **hosted Gemma 4** and **optional local GGUF** in **[`inference.py`](inference.py)**:
 
@@ -271,7 +271,7 @@ python3 server.py
 
 When **`PORT` is unset**, opens at **`http://127.0.0.1:8765/`** (or next free port). When **`PORT` is set**, listens on **`0.0.0.0:PORT`** only.
 
-### Railway (single URL for judges)
+### Railway deployment
 
 Ships **`Procfile`**, **`railway.toml`**, **`nixpacks.toml`**, and **`runtime.txt`**. Connect the GitHub repo and set **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** (and optional **`DGENE_GEMINI_MODEL`**) in Railway Variables.
 
