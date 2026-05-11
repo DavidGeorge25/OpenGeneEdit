@@ -182,11 +182,7 @@ Inference is **Google Gemma 4 only**: **Gemini API** (stdlib `urllib` in `infere
 
 ![OpenGeneEdit: retrieval and embedding search pipeline](docs/diagrams/dgene_retrieval_search.png)
 
-**End-to-end pipeline** — deploy surface, HTTP APIs, compile modes (hybrid / RAG-first / legacy), inference backends, iGEM RAG, passes, and ranking in one diagram. The SVG is wide; it is scaled here for the README. Open the file directly for full detail or zoom.
-
-<img src="docs/diagrams/full_app_pipeline.svg" alt="OpenGeneEdit full application pipeline" width="1100" />
-
-Source (Mermaid): [`docs/diagrams/full_app_pipeline.mmd`](docs/diagrams/full_app_pipeline.mmd) · also described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+**End-to-end pipeline (full diagram):** [`docs/diagrams/full_app_pipeline.mmd`](docs/diagrams/full_app_pipeline.mmd) · [`docs/diagrams/full_app_pipeline.svg`](docs/diagrams/full_app_pipeline.svg) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ### Compile modes (`DGENE_COMPILE_MODE`)
 
