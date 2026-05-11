@@ -289,8 +289,6 @@ Ships **`Procfile`**, **`railway.toml`**, **`nixpacks.toml`**, and **`runtime.tx
 
 Public URL: **`https://<service>.up.railway.app/`** serves both **`/`** and **`/api/*`**.
 
-**If GitHub pushes do not trigger a new deploy:** in Railway open the **service** → **Settings** → **Source** and confirm the correct **GitHub repository** and **branch** (usually `main`) are connected, and that **automatic deployments** are enabled for that branch. If the service was created from a template or empty image, **Connect Repo** and redeploy once. The build log you pasted (Nixpacks `pip install` then “exporting to docker image format”) means the **image built successfully**; if the running URL still shows old behavior, open **Deployments** and confirm the latest deployment is **Active** (not stuck on health check or crash loop). Increase **health check timeout** in `railway.toml` if the first boot is slow. Docker build warnings about `ARG`/`ENV` for API keys come from Nixpacks’ generated Dockerfile when variables exist at build time; prefer setting secrets only in **Railway Variables** for runtime.
-
 ### Streamlit playground
 
 ```bash

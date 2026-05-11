@@ -1,0 +1,18 @@
+# Smaller build context for Nixpacks / Docker (faster upload, less layer noise).
+.git
+.github
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+finetune_results
+.chroma_igem
+.design_snapshots
+outputs
+.env
+.env.local
+node_modules
+*.gguf

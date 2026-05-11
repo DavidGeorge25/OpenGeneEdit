@@ -1,3 +1,15 @@
 # Nixpacks defaults to `python app.py` when app.py exists — override for the web compiler.
+#
+# Default `pip install -r requirements.txt` pulls torch+CUDA (~3GB+ nvidia-* wheels). That
+# image often fails at the **publish** step to Railway’s registry. This install phase
+# overrides the Python provider: CPU-only torch first, then requirements-railway.txt.
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = [
+  "pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu",
+  "pip install -r requirements-railway.txt",
+]
+
 [start]
 cmd = "python server.py"

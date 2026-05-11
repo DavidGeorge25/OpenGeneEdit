@@ -1,0 +1,26 @@
+# Slim dependency set for Railway (server.py only): no Streamlit/Bokeh UI stack.
+# PyTorch with CUDA is NOT listed here — nixpacks.toml installs CPU-only torch first
+# (~hundreds of MB) instead of default PyPI torch + nvidia-cu* (~3GB+), which was
+# preventing the image from publishing to Railway’s registry.
+
+chromadb==1.5.8
+sentence-transformers==5.1.2
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+safetensors==0.7.0
+numpy==1.24.3
+scipy==1.13.1
+scikit-learn==1.6.1
+Pillow==10.0.1
+tqdm==4.67.1
+regex==2026.1.15
+requests==2.32.4
+PyYAML==6.0.3
+filelock==3.19.1
+packaging==25.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+networkx==3.2.1
+sympy==1.14.0
+biopython==1.85
