@@ -1,7 +1,7 @@
 # OpenGeneEdit
+[![Watch the video]]([https://youtu.be/vt5fpE0bzSY](https://www.youtube.com/watch?v=bZuBFEOxtr4)
 
 ## Demo (recommended)
-
 For quick evaluation, sharing, or whenever you want **reliable speed** without tuning GPUs or downloading weights, use the hosted deployment:
 
 **[https://opengene.up.railway.app/](https://opengene.up.railway.app/)**
