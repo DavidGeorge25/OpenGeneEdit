@@ -1,4 +1,5 @@
 # OpenGeneEdit
+Video: 
 [![Watch the video](https://img.youtube.com/vi/bZuBFEOxtr4/maxresdefault.jpg)](https://www.youtube.com/watch?v=bZuBFEOxtr4)
 ## Demo (recommended)
 For quick evaluation, sharing, or whenever you want **reliable speed** without tuning GPUs or downloading weights, use the hosted deployment:
